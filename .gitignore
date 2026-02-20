@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Build output
+dist/
+build/work/
+
+# Virtual Environment
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data (사용자 데이터는 git에 포함하지 않음)
+data/
+
+# OS
+Thumbs.db
+.DS_Store
+nul
+
+# Secrets
+.env
+
+# Temp
+temp/
+logs/
+backup/
+
+# App runtime (EXE에서 생성)
+app/
+
+# Claude
+.claude/
