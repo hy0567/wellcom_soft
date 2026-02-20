@@ -30,8 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = PROJECT_ROOT / "version.py"
 
 # app.zip에 포함할 소스 디렉터리/파일
-INCLUDE_DIRS = ["core", "ui", "agent", "updater", "server"]
-INCLUDE_FILES = ["main.py", "config.py", "version.py", "api_client.py"]
+INCLUDE_DIRS = ["core", "ui", "agent", "updater"]
+INCLUDE_FILES = ["main.py", "config.py", "version.py", "api_client.py", "launcher.py"]
 
 # 제외 패턴
 EXCLUDE_PATTERNS = [
@@ -44,6 +44,9 @@ EXCLUDE_PATTERNS = [
     "test_*",
     "*.log",
     ".env",
+    "agent_main.py",
+    "agent_config.py",
+    "build_agent.py",
 ]
 
 
