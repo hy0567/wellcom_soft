@@ -7,6 +7,7 @@ import sys
 import os
 import logging
 import traceback
+import subprocess
 from io import TextIOWrapper
 
 
@@ -96,6 +97,82 @@ def install_crash_handler():
     sys.excepthook = handler
 
 
+# ==================== 업데이트 ====================
+
+def check_for_updates(app) -> bool:
+    """시작 시 업데이트 확인. True=정상진행, False=재시작필요"""
+    try:
+        from pathlib import Path
+        from config import settings
+        from version import __version__, __github_repo__
+        from updater import UpdateChecker
+        from updater.update_dialog import UpdateNotifyDialog, UpdateDialog
+
+        if not settings.get('update.auto_check', True):
+            return True
+
+        token = settings.get('update.github_token', '')
+        checker = UpdateChecker(
+            Path(BASE_DIR), __github_repo__, token or None,
+            running_version=__version__,
+        )
+
+        has_update, release_info = checker.check_update()
+        if not has_update or not release_info:
+            return True
+
+        # 스킵 버전 확인
+        skip_ver = settings.get('update.skip_version', '')
+        if skip_ver and release_info.version == skip_ver:
+            return True
+
+        # 알림 다이얼로그
+        notify = UpdateNotifyDialog(checker.get_current_version(), release_info)
+        result = notify.exec()
+        if result == 0:
+            return True
+
+        # 업데이트 진행
+        dlg = UpdateDialog(release_info)
+        dlg.start_update(checker)
+        dlg.exec()
+
+        if dlg.is_success:
+            _restart_application()
+            return False
+
+        return True
+    except Exception as e:
+        logging.getLogger('WellcomSOFT').debug(f"업데이트 확인 실패: {e}")
+        return True
+
+
+def _restart_application():
+    """프로그램 재시작"""
+    # 1) 런처가 설정한 EXE 경로
+    exe_path = os.environ.get('WELLCOMSOFT_EXE_PATH')
+    if exe_path and os.path.exists(exe_path):
+        print(f"[Restart] EXE 경로: {exe_path}")
+        subprocess.Popen([exe_path])
+        sys.exit(0)
+
+    # 2) 설치 디렉터리 기준 EXE
+    base_dir = os.environ.get('WELLCOMSOFT_BASE_DIR')
+    if base_dir:
+        candidate = os.path.join(base_dir, 'WellcomSOFT.exe')
+        if os.path.exists(candidate):
+            print(f"[Restart] BASE_DIR 기준: {candidate}")
+            subprocess.Popen([candidate])
+            sys.exit(0)
+
+    # 3) Fallback
+    if getattr(sys, 'frozen', False):
+        subprocess.Popen([sys.executable])
+    else:
+        subprocess.Popen([sys.executable] + sys.argv)
+    sys.exit(0)
+
+
 # ==================== 메인 ====================
 
 def main():
@@ -145,6 +222,10 @@ def main():
         sys.exit(0)
 
     logger.info("로그인 완료")
+
+    # 업데이트 확인 (업데이트 적용 시 재시작)
+    if not check_for_updates(app):
+        return
 
     # 에이전트 서버 시작
     from core.agent_server import AgentServer

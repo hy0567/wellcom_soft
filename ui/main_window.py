@@ -121,6 +121,19 @@ class MainWindow(QMainWindow):
         broadcast_cmd_action.triggered.connect(self._broadcast_command_dialog)
         tools_menu.addAction(broadcast_cmd_action)
 
+        # 도움말 메뉴
+        help_menu = menubar.addMenu("도움말(&H)")
+
+        update_action = QAction("업데이트 확인(&U)...", self)
+        update_action.triggered.connect(self._check_for_updates)
+        help_menu.addAction(update_action)
+
+        help_menu.addSeparator()
+
+        about_action = QAction("WellcomSOFT 정보(&A)", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
     def _create_toolbar(self):
         toolbar = QToolBar("메인 도구")
         toolbar.setIconSize(QSize(20, 20))
@@ -418,6 +431,81 @@ class MainWindow(QMainWindow):
             f"사용자: {username} | "
             f"서버 포트: {server_port} | "
             f"연결: {self.agent_server.connected_count}대"
+        )
+
+    # ==================== 업데이트 / 정보 ====================
+
+    def _check_for_updates(self):
+        """수동 업데이트 확인"""
+        try:
+            from pathlib import Path
+            from version import __version__, __github_repo__
+            from updater import UpdateChecker
+            from updater.update_dialog import UpdateNotifyDialog, UpdateDialog
+
+            base_dir = settings.get('base_dir', '')
+            if not base_dir:
+                import main as main_mod
+                base_dir = getattr(main_mod, 'BASE_DIR', '')
+            if not base_dir:
+                import os
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+            token = settings.get('update.github_token', '')
+            checker = UpdateChecker(
+                Path(base_dir), __github_repo__, token or None,
+                running_version=__version__,
+            )
+
+            has_update, release_info = checker.check_update()
+            if not has_update or not release_info:
+                QMessageBox.information(
+                    self, "업데이트 확인",
+                    f"현재 최신 버전입니다.\n\n현재 버전: v{__version__}"
+                )
+                return
+
+            # 알림 다이얼로그
+            notify = UpdateNotifyDialog(checker.get_current_version(), release_info)
+            result = notify.exec()
+            if result == 0:
+                return
+
+            # 업데이트 진행
+            dlg = UpdateDialog(release_info)
+            dlg.start_update(checker)
+            dlg.exec()
+
+            if dlg.is_success:
+                QMessageBox.information(
+                    self, "업데이트 완료",
+                    "업데이트가 완료되었습니다.\n프로그램을 재시작합니다."
+                )
+                from main import _restart_application
+                _restart_application()
+
+        except Exception as e:
+            logger.warning(f"업데이트 확인 실패: {e}")
+            QMessageBox.warning(
+                self, "업데이트 오류",
+                f"업데이트 확인 중 오류가 발생했습니다.\n\n{e}"
+            )
+
+    def _show_about(self):
+        """프로그램 정보"""
+        try:
+            from version import __version__, __app_name__
+        except ImportError:
+            __version__ = "?"
+            __app_name__ = "WellcomSOFT"
+
+        QMessageBox.about(
+            self, f"{__app_name__} 정보",
+            f"<h3>{__app_name__}</h3>"
+            f"<p>버전: v{__version__}</p>"
+            f"<p>소프트웨어 기반 다중 PC 원격 관리 시스템</p>"
+            f"<hr>"
+            f"<p>© 2025 WellcomSOFT. All rights reserved.</p>"
         )
 
     # ==================== 윈도우 이벤트 ====================
