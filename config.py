@@ -82,7 +82,7 @@ class Settings:
             'maximized': False
         },
         'agent_server': {
-            'port': 9877,
+            'port': 4797,
             'max_connections': 200,
         },
         'screen': {
@@ -110,7 +110,7 @@ class Settings:
             'skip_version': ''
         },
         'server': {
-            'api_url': 'http://log.wellcomll.org:8000',
+            'api_url': 'http://log.wellcomll.org:4797',
             'token': '',
             'username': '',
             'auto_login': False

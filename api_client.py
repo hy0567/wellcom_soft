@@ -16,7 +16,7 @@ class APIClient:
     """서버 API 클라이언트"""
 
     def __init__(self):
-        self._base_url = settings.get('server.api_url', 'http://log.wellcomll.org:8000')
+        self._base_url = settings.get('server.api_url', 'http://log.wellcomll.org:4797')
         self._token: str = settings.get('server.token', '')
         self._user: Optional[dict] = None
 

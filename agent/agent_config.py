@@ -10,8 +10,8 @@ class AgentConfig:
 
     DEFAULT = {
         'server_ip': '',
-        'server_port': 9877,
-        'api_url': '',              # 서버 API URL (예: http://log.wellcomll.org:8000)
+        'server_port': 4797,        # 에이전트 WS 서버 리스닝 포트
+        'api_url': 'http://log.wellcomll.org:4797',   # 서버 API URL
         'api_username': '',         # 서버 로그인 사용자명
         'api_token': '',            # 서버 JWT 토큰 (자동 저장)
         'save_dir': '',

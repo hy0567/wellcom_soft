@@ -1,7 +1,11 @@
-"""다중 에이전트 WebSocket 서버
+"""다중 에이전트 WebSocket 클라이언트 (매니저 측)
 
-관리PC에서 WebSocket 서버를 실행하고, 다수의 대상PC 에이전트가 연결해옴.
-역방향 연결: 대상PC(클라이언트) → 관리PC(서버)
+매니저 PC에서 서버 REST API를 통해 에이전트 IP 목록을 조회한 뒤,
+각 에이전트의 WS 서버(포트 4797)에 직접 접속하여 원격 제어한다.
+
+아키텍처:
+  매니저(이 코드) → WS 클라이언트 → 에이전트:4797 (WS 서버)
+  서버(REST API) : 로그인/등록/IP조회만 담당, WS 중계 없음
 """
 
 import asyncio
@@ -21,14 +25,18 @@ try:
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
     WEBSOCKETS_AVAILABLE = False
-    logger.warning("websockets 미설치 — 에이전트 기능 비활성화")
+    logger.warning("websockets 미설치 — 에이전트 연결 기능 비활성화")
 
 
 class AgentServer(QObject):
-    """다중 에이전트 WebSocket 서버 (관리PC 측)"""
+    """매니저 측 에이전트 연결 관리자
+
+    서버에서 에이전트 IP 목록을 가져와 각 에이전트:4797에 WS 클라이언트로 접속.
+    기존 시그널/명령 인터페이스는 그대로 유지하여 UI 코드 변경 최소화.
+    """
 
     # 시그널
-    agent_connected = pyqtSignal(str, str)         # agent_id, remote_ip
+    agent_connected = pyqtSignal(str, str)         # agent_id, agent_ip
     agent_disconnected = pyqtSignal(str)            # agent_id
     thumbnail_received = pyqtSignal(str, bytes)     # agent_id, jpeg_data
     screen_frame_received = pyqtSignal(str, bytes)  # agent_id, jpeg_data
@@ -43,15 +51,15 @@ class AgentServer(QObject):
     HEADER_THUMBNAIL = 0x01
     HEADER_STREAM = 0x02
 
-    def __init__(self, port: int = 9877):
+    def __init__(self, port: int = 4797):
         super().__init__()
-        self._port = port
-        self._agents: Dict[str, object] = {}  # agent_id → websocket
-        self._agent_info: Dict[str, dict] = {}  # agent_id → {hostname, os_info, ...}
+        self._port = port                           # 에이전트 WS 서버 포트
+        self._agents: Dict[str, object] = {}        # agent_id → websocket
+        self._agent_info: Dict[str, dict] = {}      # agent_id → {hostname, os_info, ip, ...}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._server = None
+        self._connecting_agents: set = set()        # 연결 시도 중인 agent_id
 
     @property
     def connected_count(self) -> int:
@@ -66,10 +74,10 @@ class AgentServer(QObject):
     def get_agent_info(self, agent_id: str) -> Optional[dict]:
         return self._agent_info.get(agent_id)
 
-    # ==================== 서버 수명주기 ====================
+    # ==================== 수명주기 ====================
 
     def start_server(self):
-        """WebSocket 서버 시작 (백그라운드 스레드)"""
+        """에이전트 연결 관리 스레드 시작"""
         if not WEBSOCKETS_AVAILABLE:
             return
 
@@ -78,16 +86,15 @@ class AgentServer(QObject):
 
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name='AgentServer'
+            target=self._run_loop, daemon=True, name='AgentConnector'
         )
         self._thread.start()
-        logger.info(f"[AgentServer] 시작: 포트 {self._port}")
+        logger.info("[AgentServer] 에이전트 연결 관리자 시작")
 
     def stop_server(self):
-        """서버 중지"""
+        """모든 에이전트 연결 종료"""
         self._stop_event.set()
 
-        # 모든 에이전트 연결 종료
         for agent_id, ws in list(self._agents.items()):
             try:
                 if self._loop and self._loop.is_running():
@@ -100,6 +107,63 @@ class AgentServer(QObject):
 
         self._agents.clear()
         self._agent_info.clear()
+
+    def connect_to_agent(self, agent_id: str, ip: str,
+                         hostname: str = '', os_info: str = '',
+                         screen_width: int = 1920, screen_height: int = 1080):
+        """특정 에이전트에 WS 연결 시작 (비동기)"""
+        if not WEBSOCKETS_AVAILABLE:
+            return
+        if agent_id in self._agents or agent_id in self._connecting_agents:
+            return  # 이미 연결됨 또는 연결 시도 중
+
+        self._connecting_agents.add(agent_id)
+        # 사전에 agent_info 저장 (연결 전이라도 정보 조회 가능)
+        self._agent_info[agent_id] = {
+            'hostname': hostname,
+            'os_info': os_info,
+            'ip': ip,
+            'screen_width': screen_width,
+            'screen_height': screen_height,
+        }
+
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._connect_agent(agent_id, ip), self._loop
+            )
+
+    def connect_to_agents_from_server(self):
+        """서버 API에서 에이전트 목록 조회 → 각 에이전트에 WS 연결"""
+        from api_client import api_client
+
+        if not api_client.is_logged_in:
+            logger.warning("서버 미로그인 — 에이전트 연결 스킵")
+            return
+
+        try:
+            agents = api_client.get_agents()
+        except Exception as e:
+            logger.warning(f"에이전트 목록 조회 실패: {e}")
+            return
+
+        for agent_data in agents:
+            agent_id = agent_data.get('agent_id', '')
+            ip = agent_data.get('ip', '')
+            if not agent_id or not ip:
+                continue
+
+            if agent_data.get('is_online', False):
+                self.connect_to_agent(
+                    agent_id=agent_id,
+                    ip=ip,
+                    hostname=agent_data.get('hostname', ''),
+                    os_info=agent_data.get('os_info', ''),
+                    screen_width=agent_data.get('screen_width', 1920),
+                    screen_height=agent_data.get('screen_height', 1080),
+                )
+
+        logger.info(f"서버에서 {len(agents)}개 에이전트 목록 조회, "
+                     f"온라인: {sum(1 for a in agents if a.get('is_online'))}개")
 
     # ==================== 에이전트에 명령 전송 ====================
 
@@ -274,7 +338,7 @@ class AgentServer(QObject):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._serve())
+            self._loop.run_until_complete(self._main_loop())
         except Exception as e:
             if not self._stop_event.is_set():
                 logger.error(f"AgentServer 오류: {e}")
@@ -285,91 +349,86 @@ class AgentServer(QObject):
                 pass
             self._loop = None
 
-    async def _serve(self):
-        """WebSocket 서버 실행"""
+    async def _main_loop(self):
+        """메인 이벤트 루프 — 정지 이벤트까지 대기"""
+        while not self._stop_event.is_set():
+            await asyncio.sleep(0.5)
+
+    async def _connect_agent(self, agent_id: str, ip: str):
+        """특정 에이전트에 WS 연결 + 자동 재연결"""
+        uri = f"ws://{ip}:{self._port}"
+
         try:
-            self._server = await websockets.serve(
-                self._handle_agent,
-                '0.0.0.0',
-                self._port,
+            logger.info(f"에이전트 연결 시도: {agent_id} ({uri})")
+            async with websockets.connect(
+                uri,
                 max_size=50 * 1024 * 1024,
                 ping_interval=30,
                 ping_timeout=10,
-            )
-            logger.info(f"[AgentServer] 리스닝: ws://0.0.0.0:{self._port}")
+            ) as ws:
+                # 인증 핸드셰이크 (매니저 → 에이전트)
+                await ws.send(json.dumps({'type': 'auth'}))
 
-            while not self._stop_event.is_set():
-                await asyncio.sleep(0.5)
-        finally:
-            if self._server:
-                self._server.close()
-                await self._server.wait_closed()
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                msg = json.loads(raw)
 
-    async def _handle_agent(self, websocket):
-        """에이전트 연결 핸들러"""
-        remote = websocket.remote_address
-        remote_ip = remote[0] if remote else 'unknown'
-        agent_id = None
+                if msg.get('type') != 'auth_ok':
+                    logger.error(f"에이전트 인증 실패 [{agent_id}]: {msg}")
+                    return
 
-        try:
-            # 인증 대기
-            raw = await asyncio.wait_for(websocket.recv(), timeout=10)
-            msg = json.loads(raw)
+                # auth_ok 응답에서 에이전트 정보 업데이트
+                self._agent_info[agent_id] = {
+                    'hostname': msg.get('hostname', agent_id),
+                    'os_info': msg.get('os_info', ''),
+                    'ip': ip,
+                    'screen_width': msg.get('screen_width', 1920),
+                    'screen_height': msg.get('screen_height', 1080),
+                }
 
-            if msg.get('type') != 'auth':
-                await websocket.close()
-                return
+                # 기존 같은 agent_id 연결 교체
+                old_ws = self._agents.get(agent_id)
+                if old_ws:
+                    try:
+                        await old_ws.close()
+                    except Exception:
+                        pass
 
-            agent_id = msg.get('agent_id', remote_ip)
-            hostname = msg.get('hostname', '')
-            os_info = msg.get('os_info', '')
-            screen_width = msg.get('screen_width', 1920)
-            screen_height = msg.get('screen_height', 1080)
+                self._agents[agent_id] = ws
+                self._connecting_agents.discard(agent_id)
+                self.agent_connected.emit(agent_id, ip)
+                logger.info(f"에이전트 연결 성공: {agent_id} ({ip})")
 
-            # 인증 허용
-            await websocket.send(json.dumps({'type': 'auth_ok'}))
-
-            # 기존 같은 agent_id 연결 교체
-            old_ws = self._agents.get(agent_id)
-            if old_ws:
-                try:
-                    await old_ws.close()
-                except Exception:
-                    pass
-
-            self._agents[agent_id] = websocket
-            self._agent_info[agent_id] = {
-                'hostname': hostname,
-                'os_info': os_info,
-                'ip': remote_ip,
-                'screen_width': screen_width,
-                'screen_height': screen_height,
-            }
-
-            self.agent_connected.emit(agent_id, remote_ip)
-            logger.info(f"[AgentServer] 에이전트 연결: {agent_id} ({remote_ip})")
-
-            # 메시지 수신 루프
-            async for message in websocket:
-                if self._stop_event.is_set():
-                    break
-                if isinstance(message, str):
-                    self._handle_text_message(agent_id, message)
-                elif isinstance(message, bytes):
-                    self._handle_binary_message(agent_id, message)
+                # 메시지 수신 루프
+                async for message in ws:
+                    if self._stop_event.is_set():
+                        break
+                    if isinstance(message, str):
+                        self._handle_text_message(agent_id, message)
+                    elif isinstance(message, bytes):
+                        self._handle_binary_message(agent_id, message)
 
         except websockets.exceptions.ConnectionClosed:
-            logger.info(f"[AgentServer] 에이전트 연결 종료: {agent_id or remote_ip}")
+            logger.info(f"에이전트 연결 종료: {agent_id}")
         except asyncio.TimeoutError:
-            logger.warning(f"[AgentServer] 인증 타임아웃: {remote_ip}")
+            logger.warning(f"에이전트 인증 타임아웃: {agent_id} ({ip})")
+        except (ConnectionRefusedError, OSError) as e:
+            logger.warning(f"에이전트 연결 거부: {agent_id} ({ip}) — {e}")
         except Exception as e:
-            logger.warning(f"[AgentServer] 핸들러 오류 [{agent_id or remote_ip}]: {e}")
+            logger.warning(f"에이전트 연결 오류 [{agent_id}]: {e}")
         finally:
-            if agent_id and self._agents.get(agent_id) is websocket:
-                del self._agents[agent_id]
-                self._agent_info.pop(agent_id, None)
-                self.agent_disconnected.emit(agent_id)
-                logger.info(f"[AgentServer] 에이전트 해제: {agent_id}")
+            if agent_id in self._agents and self._agents.get(agent_id) is not None:
+                ws_current = self._agents.get(agent_id)
+                # 현재 연결이 이 함수의 것이면 정리
+                try:
+                    if ws_current and ws_current.closed:
+                        del self._agents[agent_id]
+                        self.agent_disconnected.emit(agent_id)
+                        logger.info(f"에이전트 해제: {agent_id}")
+                except Exception:
+                    self._agents.pop(agent_id, None)
+                    self.agent_disconnected.emit(agent_id)
+
+            self._connecting_agents.discard(agent_id)
 
     def _handle_text_message(self, agent_id: str, raw: str):
         """JSON 텍스트 메시지 처리"""

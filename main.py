@@ -227,16 +227,21 @@ def main():
     if not check_for_updates(app):
         return
 
-    # 에이전트 서버 시작
+    # 에이전트 연결 관리자 시작 (매니저 → 에이전트:4797 직접 연결)
     from core.agent_server import AgentServer
-    agent_port = settings.get('agent_server.port', 9877)
+    agent_port = settings.get('agent_server.port', 4797)
     agent_server = AgentServer(port=agent_port)
     agent_server.start_server()
-    logger.info(f"에이전트 서버 시작: 포트 {agent_port}")
+    logger.info(f"에이전트 연결 관리자 시작 (에이전트 WS 포트: {agent_port})")
 
     # PC 매니저 초기화
     from core.pc_manager import PCManager
     pc_manager = PCManager(agent_server)
+
+    # 서버에서 에이전트 목록 가져와 자동 연결
+    pc_manager.load_from_server()
+    agent_server.connect_to_agents_from_server()
+    logger.info("서버에서 에이전트 목록 조회 및 연결 시작")
 
     # 메인 윈도우
     from ui.main_window import MainWindow

@@ -60,7 +60,7 @@ class LoginDialog(QDialog):
         # 서버 URL
         layout.addWidget(QLabel("서버 주소"))
         self.server_input = QLineEdit()
-        self.server_input.setPlaceholderText("http://log.wellcomll.org:8000")
+        self.server_input.setPlaceholderText("http://log.wellcomll.org:4797")
         layout.addWidget(self.server_input)
 
         # 사용자명
