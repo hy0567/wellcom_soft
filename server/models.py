@@ -81,6 +81,25 @@ class AgentResponse(BaseModel):
     last_seen: Optional[str] = None
 
 
+# === Manager (매니저 PC) ===
+class ManagerRegister(BaseModel):
+    ip: str
+    ws_port: int = 4797
+
+
+class ManagerHeartbeat(BaseModel):
+    ip: str = ""
+
+
+class ManagerResponse(BaseModel):
+    id: int
+    owner_id: int
+    ip: str
+    ws_port: int = 4797
+    is_online: bool = False
+    last_seen: Optional[str] = None
+
+
 # === Groups ===
 class GroupCreate(BaseModel):
     name: str

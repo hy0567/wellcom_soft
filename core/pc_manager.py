@@ -121,18 +121,9 @@ class PCManager:
                     )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
                     # 서버의 is_online 상태 반영
+                    # (에이전트가 매니저 WS에 접속하면 _on_agent_connected에서 ONLINE 처리)
                     if agent_data.get('is_online') and not existing_pc.is_online:
                         existing_pc.status = PCStatus.CONNECTING
-                        # 온라인 에이전트에 WS 직접 연결 시도
-                        ip = agent_data.get('ip', '')
-                        if ip and not self.agent_server.is_agent_connected(agent_id):
-                            self.agent_server.connect_to_agent(
-                                agent_id=agent_id, ip=ip,
-                                hostname=hostname,
-                                os_info=agent_data.get('os_info', ''),
-                                screen_width=agent_data.get('screen_width', 1920),
-                                screen_height=agent_data.get('screen_height', 1080),
-                            )
                 else:
                     # 새 PC 추가 (DB에도 저장)
                     info = PCInfo(
@@ -161,16 +152,9 @@ class PCManager:
                     except Exception:
                         pass
 
-                    # 온라인 에이전트에 WS 직접 연결 시도
+                    # 에이전트가 매니저 WS에 접속하면 _on_agent_connected에서 ONLINE 처리
                     if agent_data.get('is_online') and info.ip:
                         pc.status = PCStatus.CONNECTING
-                        self.agent_server.connect_to_agent(
-                            agent_id=agent_id, ip=info.ip,
-                            hostname=hostname,
-                            os_info=info.os_info,
-                            screen_width=info.screen_width,
-                            screen_height=info.screen_height,
-                        )
 
         self.signals.devices_reloaded.emit()
         logger.info(f"서버에서 {len(agents)}개 에이전트 동기화 완료")

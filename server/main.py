@@ -26,6 +26,7 @@ from models import (
     UserCreate, UserUpdate, UserResponse,
     AgentRegister, AgentHeartbeat, AgentResponse,
     GroupCreate, GroupResponse,
+    ManagerRegister, ManagerHeartbeat, ManagerResponse,
 )
 
 app = FastAPI(title="WellcomSOFT API", version="1.0.0")
@@ -90,6 +91,21 @@ def startup_init():
                     owner_id INT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE KEY uq_group_owner (name, owner_id),
+                    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+
+            # managers 테이블 (매니저 = 관리 PC)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS managers (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    owner_id INT NOT NULL,
+                    ip VARCHAR(50) NOT NULL,
+                    ws_port INT DEFAULT 4797,
+                    is_online BOOLEAN DEFAULT FALSE,
+                    last_seen DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_manager_owner (owner_id),
                     FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
                 )
             """)
@@ -247,6 +263,77 @@ def agent_offline(req: AgentHeartbeat, user: dict = Depends(get_current_user)):
                 (req.agent_id, user["id"]),
             )
     return {"status": "ok"}
+
+
+# ===========================================================
+# Manager 등록/조회 (매니저 IP를 에이전트가 알아가는 용도)
+# ===========================================================
+@app.post("/api/manager/register", response_model=ManagerResponse)
+def register_manager(req: ManagerRegister, user: dict = Depends(get_current_user)):
+    """매니저(관리PC)가 자신의 IP를 등록. 에이전트가 이 IP로 WS 연결."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            now = datetime.now(timezone.utc)
+            cur.execute(
+                "SELECT id FROM managers WHERE owner_id = %s",
+                (user["id"],),
+            )
+            existing = cur.fetchone()
+
+            if existing:
+                cur.execute("""
+                    UPDATE managers SET ip = %s, ws_port = %s,
+                        is_online = TRUE, last_seen = %s
+                    WHERE id = %s
+                """, (req.ip, req.ws_port, now, existing["id"]))
+                mgr_id = existing["id"]
+            else:
+                cur.execute("""
+                    INSERT INTO managers (owner_id, ip, ws_port, is_online, last_seen)
+                    VALUES (%s, %s, %s, TRUE, %s)
+                """, (user["id"], req.ip, req.ws_port, now))
+                mgr_id = cur.lastrowid
+
+            cur.execute("SELECT * FROM managers WHERE id = %s", (mgr_id,))
+            mgr = cur.fetchone()
+
+    return _manager_to_response(mgr)
+
+
+@app.post("/api/manager/heartbeat")
+def manager_heartbeat(req: ManagerHeartbeat, user: dict = Depends(get_current_user)):
+    """매니저 하트비트 (주기적 상태 보고)"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            now = datetime.now(timezone.utc)
+            updates = ["is_online = TRUE", "last_seen = %s"]
+            params = [now]
+            if req.ip:
+                updates.append("ip = %s")
+                params.append(req.ip)
+            params.append(user["id"])
+            cur.execute(
+                f"UPDATE managers SET {', '.join(updates)} WHERE owner_id = %s",
+                params,
+            )
+    return {"status": "ok"}
+
+
+@app.get("/api/manager", response_model=ManagerResponse)
+def get_manager(user: dict = Depends(get_current_user)):
+    """같은 계정의 매니저 IP 조회 (에이전트가 매니저에 WS 연결하기 위해 사용)"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM managers WHERE owner_id = %s AND is_online = TRUE",
+                (user["id"],),
+            )
+            mgr = cur.fetchone()
+
+    if not mgr:
+        raise HTTPException(status_code=404, detail="온라인 매니저를 찾을 수 없습니다")
+
+    return _manager_to_response(mgr)
 
 
 # ===========================================================
@@ -430,6 +517,17 @@ def _agent_to_response(agent: dict) -> AgentResponse:
         owner_id=agent["owner_id"],
         owner_username=agent.get("owner_username", ""),
         last_seen=str(agent["last_seen"]) if agent.get("last_seen") else None,
+    )
+
+
+def _manager_to_response(mgr: dict) -> ManagerResponse:
+    return ManagerResponse(
+        id=mgr["id"],
+        owner_id=mgr["owner_id"],
+        ip=mgr["ip"],
+        ws_port=mgr.get("ws_port", 4797),
+        is_online=bool(mgr.get("is_online", False)),
+        last_seen=str(mgr["last_seen"]) if mgr.get("last_seen") else None,
     )
 
 

@@ -2,11 +2,16 @@
 
 기능:
 - 서버 로그인 + 자기 등록 + 하트비트
-- WebSocket 서버 (포트 4797, 매니저가 접속해옴)
+- 서버에서 매니저 IP 조회 → 매니저:4797에 WebSocket 클라이언트로 접속
 - 화면 캡처 및 스트리밍 (mss + MJPEG)
 - 키보드/마우스 입력 주입 (pynput)
 - 양방향 클립보드 동기화
 - 파일 수신
+
+아키텍처:
+  매니저 = WS 서버 (0.0.0.0:4797, 포트포워딩 필요)
+  에이전트(이 코드) = WS 클라이언트 (서버에서 매니저IP 조회 → 매니저:4797 접속)
+  서버(REST API) : 로그인/등록/매니저IP조회만 담당
 
 사용법:
   python agent_main.py
@@ -164,6 +169,21 @@ class AgentAPIClient:
         except Exception:
             pass
 
+    def get_manager_info(self) -> Optional[dict]:
+        """서버에서 같은 계정의 매니저 IP 조회"""
+        try:
+            r = requests.get(
+                f'{self.config.api_url}/api/manager',
+                headers=self._headers(),
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return r.json()
+            return None
+        except Exception as e:
+            logger.debug(f"매니저 정보 조회 실패: {e}")
+            return None
+
 
 def _get_local_ip() -> str:
     """로컬 IP 주소 조회"""
@@ -188,10 +208,11 @@ def _get_mac_address() -> str:
 
 
 class WellcomAgent:
-    """트레이 아이콘 + 서버 등록 + WebSocket 서버 + 화면 캡처 + 입력 주입
+    """서버 등록 + 매니저에 WS 클라이언트 접속 + 화면 캡처 + 입력 주입
 
-    에이전트는 포트 4797에서 WS 서버를 실행하고 매니저의 접속을 대기한다.
-    서버(REST API)에는 자기 IP를 등록하여 매니저가 조회 후 직접 연결할 수 있게 한다.
+    에이전트는 서버(REST API)에서 매니저 IP를 조회한 뒤,
+    매니저:4797에 WS 클라이언트로 접속하여 원격 제어를 받는다.
+    매니저가 오프라인이면 주기적으로 재시도한다.
     """
 
     def __init__(self):
@@ -201,16 +222,18 @@ class WellcomAgent:
         self.clipboard = ClipboardMonitor()
         self.file_receiver = FileReceiver(self.config.save_dir)
         self.api_client: Optional[AgentAPIClient] = None
-        self._connected_managers = {}  # remote_ip → websocket
+        self._ws: Optional[object] = None           # 매니저 websocket
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tray_thread = None
         self._heartbeat_thread = None
         self._running = True
         self._streaming = False
-        self._stream_tasks = {}  # websocket → task
+        self._stream_task = None
         self._agent_id = socket.gethostname()
         self._local_ip = _get_local_ip()
         self._mac_address = _get_mac_address()
+        self._manager_ip = ''
+        self._manager_port = 4797
 
     def _get_system_info(self) -> dict:
         """시스템 정보 수집"""
@@ -312,6 +335,21 @@ class WellcomAgent:
             screen_height=screen_h,
         )
 
+    def _query_manager_ip(self) -> bool:
+        """서버에서 매니저 IP 조회"""
+        if not self.api_client:
+            return False
+
+        mgr = self.api_client.get_manager_info()
+        if mgr:
+            self._manager_ip = mgr.get('ip', '')
+            self._manager_port = mgr.get('ws_port', 4797)
+            logger.info(f"매니저 IP 조회 성공: {self._manager_ip}:{self._manager_port}")
+            return bool(self._manager_ip)
+
+        logger.warning("매니저 IP를 찾을 수 없습니다 (매니저 오프라인?)")
+        return False
+
     def _heartbeat_loop(self):
         """하트비트 스레드 — 서버에 주기적으로 IP/상태 전송"""
         interval = self.config.heartbeat_interval
@@ -330,7 +368,7 @@ class WellcomAgent:
                 )
 
     def start(self):
-        """에이전트 시작: 서버 로그인 → 등록 → WS 서버 시작"""
+        """에이전트 시작: 서버 로그인 → 등록 → 매니저 IP 조회 → WS 클라이언트 접속"""
         # 1) 서버 로그인
         if not self._server_login():
             logger.error("서버 로그인 실패 — 종료합니다. 재실행 후 다시 시도하세요.")
@@ -348,7 +386,6 @@ class WellcomAgent:
         logger.info("WellcomSOFT Agent 시작")
         logger.info(f"에이전트 ID: {self._agent_id}")
         logger.info(f"로컬 IP: {self._local_ip}")
-        logger.info(f"WS 서버 포트: {self.config.server_port}")
 
         # 4) 클립보드 감시
         if self.config.clipboard_sync:
@@ -360,11 +397,11 @@ class WellcomAgent:
         )
         self._tray_thread.start()
 
-        # 6) WebSocket 서버 시작 (매니저의 접속 대기)
+        # 6) 매니저에 WS 클라이언트로 접속 (자동 재연결 포함)
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._run_server())
+            self._loop.run_until_complete(self._run_client())
         except KeyboardInterrupt:
             logger.info("Ctrl+C — 종료")
         finally:
@@ -374,82 +411,81 @@ class WellcomAgent:
             self.clipboard.stop_monitoring()
             self.screen_capture.close()
 
-    async def _run_server(self):
-        """WS 서버 실행 — 매니저가 에이전트:4797 에 접속해옴"""
-        port = self.config.server_port
-        try:
-            server = await websockets.serve(
-                self._handle_manager,
-                '0.0.0.0',
-                port,
-                max_size=50 * 1024 * 1024,
-                ping_interval=30,
-                ping_timeout=10,
-            )
-            logger.info(f"WS 서버 리스닝: ws://0.0.0.0:{port}")
+    async def _run_client(self):
+        """매니저에 WS 클라이언트로 접속 + 자동 재연결 루프"""
+        reconnect_interval = 5  # 초
 
-            # 서버가 종료될 때까지 대기
-            while self._running:
-                await asyncio.sleep(0.5)
+        while self._running:
+            # 매니저 IP 조회
+            if not self._manager_ip:
+                if not self._query_manager_ip():
+                    logger.info(f"매니저 대기 중... ({reconnect_interval}초 후 재시도)")
+                    await asyncio.sleep(reconnect_interval)
+                    continue
 
-            server.close()
-            await server.wait_closed()
-        except Exception as e:
-            logger.error(f"WS 서버 오류: {e}")
+            uri = f"ws://{self._manager_ip}:{self._manager_port}"
 
-    async def _handle_manager(self, websocket):
-        """매니저 연결 핸들러 — 인증 → 메시지 루프"""
-        remote = websocket.remote_address
-        remote_ip = remote[0] if remote else 'unknown'
-        logger.info(f"매니저 접속: {remote_ip}")
+            try:
+                logger.info(f"매니저 접속 시도: {uri}")
+                async with websockets.connect(
+                    uri,
+                    max_size=50 * 1024 * 1024,
+                    ping_interval=30,
+                    ping_timeout=10,
+                ) as ws:
+                    self._ws = ws
 
-        try:
-            # 인증 대기
-            raw = await asyncio.wait_for(websocket.recv(), timeout=10)
-            msg = json.loads(raw)
+                    # 인증 핸드셰이크 (에이전트 → 매니저)
+                    sys_info = self._get_system_info()
+                    screen_w, screen_h = self.screen_capture.screen_size
+                    await ws.send(json.dumps({
+                        'type': 'auth',
+                        'agent_id': sys_info['agent_id'],
+                        'hostname': sys_info['hostname'],
+                        'os_info': sys_info['os_info'],
+                        'screen_width': screen_w,
+                        'screen_height': screen_h,
+                    }))
 
-            if msg.get('type') != 'auth':
-                logger.warning(f"잘못된 인증 요청: {msg}")
-                await websocket.close()
-                return
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    msg = json.loads(raw)
+                    if msg.get('type') != 'auth_ok':
+                        logger.error(f"매니저 인증 실패: {msg}")
+                        self._ws = None
+                        await asyncio.sleep(reconnect_interval)
+                        continue
 
-            # 인증 허용 + 에이전트 정보 전송
-            sys_info = self._get_system_info()
-            screen_w, screen_h = self.screen_capture.screen_size
-            await websocket.send(json.dumps({
-                'type': 'auth_ok',
-                'agent_id': sys_info['agent_id'],
-                'hostname': sys_info['hostname'],
-                'os_info': sys_info['os_info'],
-                'screen_width': screen_w,
-                'screen_height': screen_h,
-            }))
+                    logger.info(f"매니저 연결 성공: {self._manager_ip}:{self._manager_port}")
 
-            self._connected_managers[remote_ip] = websocket
-            logger.info(f"매니저 인증 완료: {remote_ip}")
+                    # 메시지 수신 루프
+                    async for message in ws:
+                        if not self._running:
+                            break
+                        if isinstance(message, str):
+                            await self._handle_text(ws, message)
+                        elif isinstance(message, bytes):
+                            await self._handle_binary(ws, message)
 
-            # 메시지 수신 루프
-            async for message in websocket:
-                if not self._running:
-                    break
-                if isinstance(message, str):
-                    await self._handle_text(websocket, message)
-                elif isinstance(message, bytes):
-                    await self._handle_binary(websocket, message)
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("매니저 연결 종료")
+            except asyncio.TimeoutError:
+                logger.warning("매니저 인증 타임아웃")
+            except (ConnectionRefusedError, OSError) as e:
+                logger.warning(f"매니저 연결 실패: {e}")
+            except Exception as e:
+                logger.warning(f"매니저 접속 오류: {e}")
+            finally:
+                self._ws = None
+                # 스트리밍 정리
+                if self._stream_task:
+                    self._stream_task.cancel()
+                    self._stream_task = None
 
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"매니저 연결 종료: {remote_ip}")
-        except asyncio.TimeoutError:
-            logger.warning(f"매니저 인증 타임아웃: {remote_ip}")
-        except Exception as e:
-            logger.warning(f"매니저 핸들러 오류 [{remote_ip}]: {e}")
-        finally:
-            self._connected_managers.pop(remote_ip, None)
-            # 해당 매니저의 스트리밍 태스크 정리
-            task = self._stream_tasks.pop(websocket, None)
-            if task:
-                task.cancel()
-            logger.info(f"매니저 해제: {remote_ip}")
+            if self._running:
+                # 매니저 IP 갱신 (매니저가 재시작했을 수 있음)
+                self._manager_ip = ''
+                logger.info(f"매니저 재접속 대기... ({reconnect_interval}초)")
+                await asyncio.sleep(reconnect_interval)
 
     async def _handle_text(self, websocket, raw: str):
         """JSON 텍스트 메시지 처리"""
@@ -470,18 +506,16 @@ class WellcomAgent:
             fps = msg.get('fps', self.config.screen_fps)
             quality = msg.get('quality', self.config.screen_quality)
             # 기존 스트리밍 정리
-            old_task = self._stream_tasks.get(websocket)
-            if old_task:
-                old_task.cancel()
-            task = asyncio.ensure_future(
+            if self._stream_task:
+                self._stream_task.cancel()
+            self._stream_task = asyncio.ensure_future(
                 self._stream_loop(websocket, fps, quality)
             )
-            self._stream_tasks[websocket] = task
 
         elif msg_type == 'stop_stream':
-            task = self._stream_tasks.pop(websocket, None)
-            if task:
-                task.cancel()
+            if self._stream_task:
+                self._stream_task.cancel()
+                self._stream_task = None
 
         elif msg_type == 'key_event':
             self.input_handler.handle_key_event(
@@ -560,7 +594,7 @@ class WellcomAgent:
             logger.debug(f"썸네일 전송 실패: {e}")
 
     async def _stream_loop(self, websocket, fps: int, quality: int):
-        """화면 스트리밍 루프 (특정 매니저에 대해)"""
+        """화면 스트리밍 루프"""
         interval = 1.0 / max(1, fps)
         logger.info(f"스트리밍 시작: {fps}fps, quality={quality}")
 
@@ -621,8 +655,8 @@ class WellcomAgent:
             self.clipboard.set_clipboard_image(png_data)
 
     def _on_clipboard_changed(self, fmt: str, data):
-        """로컬 클립보드 변경 → 연결된 모든 매니저에 전송"""
-        if not self._connected_managers:
+        """로컬 클립보드 변경 → 매니저에 전송"""
+        if not self._ws:
             return
 
         if fmt == 'text':
@@ -641,8 +675,7 @@ class WellcomAgent:
             return
 
         if self._loop and self._loop.is_running():
-            for ws in list(self._connected_managers.values()):
-                asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
+            asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
 
     def _run_tray(self):
         """시스템 트레이 아이콘"""
@@ -663,14 +696,13 @@ class WellcomAgent:
                 os._exit(0)
 
             def on_show_info(icon, item):
-                mgr_count = len(self._connected_managers)
-                status = f"매니저 {mgr_count}대 연결" if mgr_count else "대기 중"
-                api_info = f"서버: {self.config.api_url}"
-                logger.info(f"{api_info} | WS포트: {self.config.server_port} | {status}")
+                connected = "연결됨" if self._ws else "대기 중"
+                mgr_info = f"매니저: {self._manager_ip}:{self._manager_port}" if self._manager_ip else "매니저 미발견"
+                logger.info(f"서버: {self.config.api_url} | {mgr_info} | {connected}")
 
             menu = pystray.Menu(
                 pystray.MenuItem(
-                    f'WellcomSOFT Agent (:{self.config.server_port})',
+                    'WellcomSOFT Agent',
                     on_show_info,
                     default=True,
                 ),
@@ -726,13 +758,6 @@ def main():
             api_url = sys.argv[idx + 1]
             config.set('api_url', api_url)
             print(f"서버 API URL 설정: {api_url}")
-
-    if '--port' in sys.argv:
-        idx = sys.argv.index('--port')
-        if idx + 1 < len(sys.argv):
-            port = int(sys.argv[idx + 1])
-            config.set('server_port', port)
-            print(f"WS 서버 포트 설정: {port}")
 
     if '--install' in sys.argv:
         install_startup()
