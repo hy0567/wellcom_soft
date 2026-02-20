@@ -29,11 +29,12 @@ class UpdateChecker:
     """업데이트 확인 및 적용 관리자"""
 
     def __init__(self, base_dir: Path, repo: str, token: str = None,
-                 running_version: str = None):
+                 running_version: str = None, asset_name: str = "app.zip"):
         self.base_dir = base_dir
         self.app_dir = base_dir / "app"
         self.temp_dir = base_dir / "temp"
         self._running_version = running_version
+        self.asset_name = asset_name
         self.github = GitHubClient(repo, token)
         self.file_manager = FileManager(base_dir)
 
@@ -93,7 +94,7 @@ class UpdateChecker:
             (update_available, release_info)
         """
         try:
-            release = self.github.get_latest_release()
+            release = self.github.get_latest_release(asset_name=self.asset_name)
             if not release:
                 return False, None
 
@@ -112,7 +113,7 @@ class UpdateChecker:
                      progress_callback=None) -> bool:
         """업데이트 적용
 
-        1. app.zip 다운로드 -> temp/
+        1. 에셋(app.zip/agent.zip) 다운로드 -> temp/
         2. SHA256 체크섬 검증
         3. 현재 app/ 백업
         4. app/ 비우고 새 코드 압축 해제
@@ -120,7 +121,7 @@ class UpdateChecker:
         """
         try:
             self.temp_dir.mkdir(exist_ok=True)
-            zip_path = self.temp_dir / "app.zip"
+            zip_path = self.temp_dir / self.asset_name
 
             # 1. 다운로드
             logger.info(f"다운로드 시작: v{release.version}")

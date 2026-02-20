@@ -36,8 +36,12 @@ class GitHubClient:
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
 
-    def get_latest_release(self) -> Optional[ReleaseInfo]:
-        """최신 릴리스 정보 조회"""
+    def get_latest_release(self, asset_name: str = "app.zip") -> Optional[ReleaseInfo]:
+        """최신 릴리스 정보 조회
+
+        Args:
+            asset_name: 다운로드할 에셋 파일명 (기본 "app.zip", 에이전트는 "agent.zip")
+        """
         url = f"{self.API_BASE}/repos/{self.repo}/releases/latest"
         try:
             resp = requests.get(url, headers=self.headers, timeout=10)
@@ -50,21 +54,21 @@ class GitHubClient:
             resp.raise_for_status()
             data = resp.json()
 
-            # app.zip 에셋 찾기
+            # 지정된 에셋 찾기
             download_url = None
             asset_id = 0
             for asset in data.get("assets", []):
-                if asset["name"] == "app.zip":
+                if asset["name"] == asset_name:
                     download_url = asset["browser_download_url"]
                     asset_id = asset.get("id", 0)
                     break
 
             if not download_url:
-                logger.warning("릴리스에 app.zip 에셋이 없습니다.")
+                logger.warning(f"릴리스에 {asset_name} 에셋이 없습니다.")
                 return None
 
             # body에서 SHA256 체크섬 파싱
-            checksum = self._parse_checksum(data.get("body", ""))
+            checksum = self._parse_checksum(data.get("body", ""), asset_name)
 
             return ReleaseInfo(
                 version=data["tag_name"].lstrip("v"),
@@ -121,12 +125,29 @@ class GitHubClient:
             return False
 
     @staticmethod
-    def _parse_checksum(body: str) -> str:
-        """릴리스 노트에서 SHA256 체크섬 추출"""
+    def _parse_checksum(body: str, asset_name: str = "app.zip") -> str:
+        """릴리스 노트에서 SHA256 체크섬 추출
+
+        지원 형식:
+        - "SHA256: abcdef..."                    (단일 에셋)
+        - "SHA256(app.zip): abcdef..."           (다중 에셋)
+        - "SHA256(agent.zip): 123456..."         (다중 에셋)
+        """
         for line in body.split('\n'):
-            if 'SHA256' in line.upper():
-                # "SHA256: abcdef..." 또는 "SHA256:abcdef..." 형식
+            upper_line = line.upper()
+            if 'SHA256' not in upper_line:
+                continue
+
+            # 다중 에셋 형식: "SHA256(app.zip): abcdef..."
+            if f'SHA256({asset_name})' in line:
+                parts = line.split(':', 1)
+                if len(parts) >= 2:
+                    return parts[1].strip()
+
+            # 단일 에셋 형식 (레거시): "SHA256: abcdef..."
+            if '(' not in line and ':' in line:
                 parts = line.split(':')
                 if len(parts) >= 2:
                     return parts[-1].strip()
+
         return ""

@@ -5,6 +5,8 @@ WellcomSOFT Agent PyInstaller Spec
 출력: dist/WellcomAgent/ (onedir 모드)
 
 에이전트는 GUI가 없으므로 PyQt6 제외 — 경량 빌드.
+런처(agent_launcher.py)가 엔트리포인트 → app/ 폴더의 agent_main을 동적 로드.
+자동 업데이트 시 app/ 폴더만 교체하면 코드가 갱신됨.
 """
 import sys
 from pathlib import Path
@@ -14,13 +16,26 @@ project_path = Path(SPECPATH).parent  # wellcomsoft/
 block_cipher = None
 
 a = Analysis(
-    [str(project_path / 'agent' / 'agent_main.py')],
+    [str(project_path / 'agent' / 'agent_launcher.py')],  # 런처가 엔트리포인트
     pathex=[
         str(project_path / 'agent'),
         str(project_path),
     ],
     binaries=[],
     datas=[
+        # 최초 배포 시 app/ 코드를 포함
+        (str(project_path / 'agent' / 'agent_main.py'), 'app'),
+        (str(project_path / 'agent' / 'agent_config.py'), 'app'),
+        (str(project_path / 'agent' / 'screen_capture.py'), 'app'),
+        (str(project_path / 'agent' / 'input_handler.py'), 'app'),
+        (str(project_path / 'agent' / 'clipboard_monitor.py'), 'app'),
+        (str(project_path / 'agent' / 'file_receiver.py'), 'app'),
+        (str(project_path / 'agent' / 'version.py'), 'app'),
+        # updater 모듈 (자동 업데이트용)
+        (str(project_path / 'updater' / '__init__.py'), 'app/updater'),
+        (str(project_path / 'updater' / 'github_client.py'), 'app/updater'),
+        (str(project_path / 'updater' / 'update_checker.py'), 'app/updater'),
+        (str(project_path / 'updater' / 'file_manager.py'), 'app/updater'),
         # 아이콘 파일 (트레이 아이콘용)
         (str(project_path / 'build' / 'wellcom.ico'), 'assets'),
     ],
@@ -41,11 +56,13 @@ a = Analysis(
         'PIL.ImageDraw',
         'json',
         'hashlib',
+        'zipfile',
         'asyncio',
         'uuid',
         'winreg',
         'tkinter',
         'tkinter.simpledialog',
+        'tkinter.messagebox',
     ],
     hookspath=[],
     runtime_hooks=[],

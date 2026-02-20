@@ -9,11 +9,11 @@ WellcomSOFT 원커맨드 릴리스 도구
     python tools/release.py --dry-run patch "테스트" # 실제 실행 없이 확인
 
 동작:
-    1. version.py 버전 자동 증가
-    2. app.zip 생성 (불필요 파일 제외)
+    1. version.py (매니저+에이전트) 버전 자동 증가
+    2. app.zip (매니저) + agent.zip (에이전트) 생성
     3. SHA256 체크섬 계산
     4. git commit + tag
-    5. gh release create + app.zip 업로드
+    5. gh release create + 두 에셋 업로드
 """
 
 import os
@@ -28,12 +28,14 @@ from pathlib import Path
 # 프로젝트 루트 (wellcomsoft/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = PROJECT_ROOT / "version.py"
+AGENT_VERSION_FILE = PROJECT_ROOT / "agent" / "version.py"
 
+# ==================== app.zip (매니저) ====================
 # app.zip에 포함할 소스 디렉터리/파일
 INCLUDE_DIRS = ["core", "ui", "agent", "updater"]
 INCLUDE_FILES = ["main.py", "config.py", "version.py", "api_client.py", "launcher.py"]
 
-# 제외 패턴
+# 매니저 app.zip 제외 패턴
 EXCLUDE_PATTERNS = [
     "__pycache__",
     ".pyc",
@@ -46,7 +48,24 @@ EXCLUDE_PATTERNS = [
     ".env",
     "agent_main.py",
     "agent_config.py",
+    "agent_launcher.py",
     "build_agent.py",
+]
+
+# ==================== agent.zip (에이전트) ====================
+# agent.zip에 포함할 파일 (agent/ 하위 → 루트, updater/ → updater/)
+AGENT_FILES = [
+    "agent/agent_main.py",
+    "agent/agent_config.py",
+    "agent/screen_capture.py",
+    "agent/input_handler.py",
+    "agent/clipboard_monitor.py",
+    "agent/file_receiver.py",
+    "agent/version.py",
+    "updater/__init__.py",
+    "updater/github_client.py",
+    "updater/update_checker.py",
+    "updater/file_manager.py",
 ]
 
 
@@ -83,14 +102,18 @@ def bump_version(current: str, bump_type: str) -> str:
 
 
 def write_version(new_version: str):
-    """version.py에 새 버전 기록"""
-    content = VERSION_FILE.read_text(encoding="utf-8")
-    updated = re.sub(
-        r'(__version__\s*=\s*["\'])[^"\']+(["\'])',
-        rf"\g<1>{new_version}\g<2>",
-        content,
-    )
-    VERSION_FILE.write_text(updated, encoding="utf-8")
+    """매니저 + 에이전트 version.py 모두 업데이트"""
+    for vf in [VERSION_FILE, AGENT_VERSION_FILE]:
+        if not vf.exists():
+            print(f"[WARN] 버전 파일 없음: {vf}")
+            continue
+        content = vf.read_text(encoding="utf-8")
+        updated = re.sub(
+            r'(__version__\s*=\s*["\'])[^"\']+(["\'])',
+            rf"\g<1>{new_version}\g<2>",
+            content,
+        )
+        vf.write_text(updated, encoding="utf-8")
 
 
 def should_exclude(path: Path) -> bool:
@@ -112,7 +135,7 @@ def should_exclude(path: Path) -> bool:
 
 
 def create_app_zip(output_path: Path) -> int:
-    """app.zip 생성, 파일 수 반환"""
+    """app.zip (매니저) 생성, 파일 수 반환"""
     file_count = 0
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         # 개별 파일
@@ -135,6 +158,32 @@ def create_app_zip(output_path: Path) -> int:
                 arc_name = str(file_path.relative_to(PROJECT_ROOT))
                 zf.write(file_path, arc_name)
                 file_count += 1
+
+    return file_count
+
+
+def _agent_arc_name(rel_path: str) -> str:
+    """agent.zip 내부 경로 결정
+
+    agent/ 하위 파일은 루트에 배치, updater/ 는 유지
+    """
+    if rel_path.startswith('agent/'):
+        return rel_path[len('agent/'):]
+    return rel_path
+
+
+def create_agent_zip(output_path: Path) -> int:
+    """agent.zip (에이전트) 생성, 파일 수 반환"""
+    file_count = 0
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel_path in AGENT_FILES:
+            src = PROJECT_ROOT / rel_path
+            if not src.exists():
+                print(f"  [WARN] 에이전트 파일 없음: {rel_path}")
+                continue
+            arc_name = _agent_arc_name(rel_path)
+            zf.write(src, arc_name)
+            file_count += 1
 
     return file_count
 
@@ -223,35 +272,48 @@ def main():
     if not args.dry_run:
         check_prerequisites()
 
-    # 1. version.py 업데이트
-    print("[1/5] version.py 업데이트")
+    # 1. version.py 업데이트 (매니저 + 에이전트)
+    print("[1/6] version.py 업데이트 (매니저 + 에이전트)")
     if not args.dry_run:
         write_version(new_version)
     print(f"  → {new_version}")
 
-    # 2. app.zip 생성
-    print("[2/5] app.zip 생성")
-    zip_path = PROJECT_ROOT / "app.zip"
+    # 2. app.zip (매니저) 생성
+    print("[2/6] app.zip (매니저) 생성")
+    app_zip_path = PROJECT_ROOT / "app.zip"
     if not args.dry_run:
-        file_count = create_app_zip(zip_path)
-        size_mb = zip_path.stat().st_size / 1024 / 1024
+        file_count = create_app_zip(app_zip_path)
+        size_mb = app_zip_path.stat().st_size / 1024 / 1024
         print(f"  → {file_count}개 파일, {size_mb:.1f}MB")
     else:
         print("  → (스킵)")
 
-    # 3. SHA256 체크섬
-    print("[3/5] SHA256 체크섬")
+    # 3. agent.zip (에이전트) 생성
+    print("[3/6] agent.zip (에이전트) 생성")
+    agent_zip_path = PROJECT_ROOT / "agent.zip"
     if not args.dry_run:
-        checksum = calc_sha256(zip_path)
-        print(f"  → {checksum[:16]}...")
+        file_count = create_agent_zip(agent_zip_path)
+        size_mb = agent_zip_path.stat().st_size / 1024 / 1024
+        print(f"  → {file_count}개 파일, {size_mb:.1f}MB")
     else:
-        checksum = "(dry-run)"
         print("  → (스킵)")
 
-    # 4. Git commit + tag
-    print("[4/5] Git commit + tag")
+    # 4. SHA256 체크섬
+    print("[4/6] SHA256 체크섬")
     if not args.dry_run:
-        run_cmd(["git", "add", "version.py"])
+        app_checksum = calc_sha256(app_zip_path)
+        agent_checksum = calc_sha256(agent_zip_path)
+        print(f"  app.zip   → {app_checksum[:16]}...")
+        print(f"  agent.zip → {agent_checksum[:16]}...")
+    else:
+        app_checksum = "(dry-run)"
+        agent_checksum = "(dry-run)"
+        print("  → (스킵)")
+
+    # 5. Git commit + tag
+    print("[5/6] Git commit + tag")
+    if not args.dry_run:
+        run_cmd(["git", "add", "version.py", "agent/version.py"])
         run_cmd(["git", "commit", "-m", f"release: v{new_version} - {args.message}"])
         run_cmd(["git", "tag", tag])
         run_cmd(["git", "push"])
@@ -259,20 +321,26 @@ def main():
     else:
         print("  → (스킵)")
 
-    # 5. GitHub Release
-    print("[5/5] GitHub Release 생성")
-    release_notes = f"{args.message}\n\nSHA256: {checksum}" if args.message else f"SHA256: {checksum}"
+    # 6. GitHub Release (두 에셋 업로드)
+    print("[6/6] GitHub Release 생성 (app.zip + agent.zip)")
+    release_notes = args.message or ""
+    if release_notes:
+        release_notes += "\n\n"
+    release_notes += f"SHA256(app.zip): {app_checksum}\nSHA256(agent.zip): {agent_checksum}"
+
     if not args.dry_run:
         run_cmd([
             "gh", "release", "create", tag,
-            str(zip_path),
+            str(app_zip_path),
+            str(agent_zip_path),
             "--title", f"v{new_version}",
             "--notes", release_notes,
         ])
         # 정리
-        zip_path.unlink(missing_ok=True)
+        app_zip_path.unlink(missing_ok=True)
+        agent_zip_path.unlink(missing_ok=True)
     else:
-        print(f"  → gh release create {tag} app.zip")
+        print(f"  → gh release create {tag} app.zip agent.zip")
         print(f"  → notes: {release_notes}")
 
     print()

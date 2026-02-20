@@ -749,6 +749,132 @@ def uninstall_startup():
         print(f"시작프로그램 해제 실패: {e}")
 
 
+def _get_agent_base_dir() -> str:
+    """에이전트 설치 기본 경로 감지"""
+    env_base = os.environ.get('WELLCOMAGENT_BASE_DIR')
+    if env_base and os.path.isdir(env_base):
+        return env_base
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _restart_agent():
+    """에이전트 프로세스 재시작"""
+    # 1) 런처가 설정한 EXE 경로
+    exe_path = os.environ.get('WELLCOMAGENT_EXE_PATH')
+    if exe_path and os.path.exists(exe_path):
+        logger.info(f"[Restart] EXE 경로: {exe_path}")
+        subprocess.Popen([exe_path])
+        os._exit(0)
+
+    # 2) 설치 디렉터리 기준 EXE
+    base_dir = os.environ.get('WELLCOMAGENT_BASE_DIR')
+    if base_dir:
+        candidate = os.path.join(base_dir, 'WellcomAgent.exe')
+        if os.path.exists(candidate):
+            logger.info(f"[Restart] BASE_DIR 기준: {candidate}")
+            subprocess.Popen([candidate])
+            os._exit(0)
+
+    # 3) Fallback
+    if getattr(sys, 'frozen', False):
+        subprocess.Popen([sys.executable])
+    else:
+        subprocess.Popen([sys.executable] + sys.argv)
+    os._exit(0)
+
+
+def check_agent_update() -> bool:
+    """에이전트 업데이트 확인 (tkinter UI).
+
+    Returns:
+        True = 정상 진행, False = 재시작 필요
+    """
+    try:
+        from pathlib import Path
+
+        # 버전 정보 로드
+        try:
+            from version import __version__, __github_repo__, __asset_name__
+        except ImportError:
+            logger.debug("agent/version.py 없음 — 업데이트 확인 스킵")
+            return True
+
+        base_dir = Path(_get_agent_base_dir())
+        # app/ 디렉터리가 없으면 런처 없이 직접 실행 중 → 스킵
+        if not (base_dir / "app").exists() and not os.environ.get('WELLCOMAGENT_BASE_DIR'):
+            logger.debug("런처 없이 실행 중 — 업데이트 확인 스킵")
+            return True
+
+        # updater 모듈 로드
+        try:
+            # app/ 경로에서 실행 중이면 updater가 같은 레벨에 없을 수 있음
+            # sys.path에 부모 디렉터리 추가
+            parent_dir = str(base_dir / "app")
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+
+            from updater.update_checker import UpdateChecker
+        except ImportError:
+            logger.debug("updater 모듈 없음 — 업데이트 확인 스킵")
+            return True
+
+        checker = UpdateChecker(
+            base_dir=base_dir,
+            repo=__github_repo__,
+            token=None,
+            running_version=__version__,
+            asset_name=__asset_name__,
+        )
+
+        has_update, release_info = checker.check_update()
+        if not has_update or not release_info:
+            return True
+
+        # tkinter 알림 (에이전트는 PyQt6 없음)
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+
+            answer = messagebox.askyesno(
+                "WellcomAgent 업데이트",
+                f"새 버전이 있습니다.\n\n"
+                f"현재: v{__version__}\n"
+                f"최신: v{release_info.version}\n\n"
+                f"업데이트하시겠습니까?",
+                parent=root,
+            )
+            root.destroy()
+
+            if not answer:
+                return True
+
+        except Exception:
+            # tkinter 없으면 자동 업데이트
+            logger.info("tkinter 없음 — 자동 업데이트 진행")
+
+        # 업데이트 적용
+        logger.info(f"에이전트 업데이트 시작: v{__version__} → v{release_info.version}")
+        success = checker.apply_update(release_info)
+
+        if success:
+            logger.info("업데이트 완료 — 재시작합니다")
+            _restart_agent()
+            return False
+
+        logger.error("업데이트 적용 실패")
+        return True
+
+    except Exception as e:
+        logger.debug(f"업데이트 확인 실패: {e}")
+        return True
+
+
 def main():
     config = AgentConfig()
 
@@ -763,6 +889,10 @@ def main():
         install_startup()
     elif '--uninstall' in sys.argv:
         uninstall_startup()
+        return
+
+    # 업데이트 확인 (업데이트 적용 시 재시작)
+    if not check_agent_update():
         return
 
     agent = WellcomAgent()

@@ -4,7 +4,7 @@
 ; 출력: dist/WellcomAgent_Setup.exe
 
 #define MyAppName "WellcomAgent"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Wellcom"
 #define MyAppExeName "WellcomAgent.exe"
 
@@ -53,7 +53,10 @@ Source: "..\dist\WellcomAgent\WellcomAgent.exe"; DestDir: "{app}"; Flags: ignore
 Source: "..\dist\WellcomAgent\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
+Name: "{app}\app"; Permissions: everyone-full
 Name: "{app}\logs"; Permissions: everyone-full
+Name: "{app}\backup"; Permissions: everyone-full
+Name: "{app}\temp"; Permissions: everyone-full
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -74,7 +77,10 @@ Filename: "{app}\{#MyAppExeName}"; Description: "WellcomAgent 실행"; Flags: no
 Filename: "taskkill"; Parameters: "/f /im WellcomAgent.exe"; Flags: runhidden
 
 [UninstallDelete]
+Type: filesandordirs; Name: "{app}\app"
 Type: filesandordirs; Name: "{app}\logs"
+Type: filesandordirs; Name: "{app}\backup"
+Type: filesandordirs; Name: "{app}\temp"
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Code]
