@@ -472,6 +472,7 @@ class WellcomAgent:
             return
 
         msg_type = msg.get('type', '')
+        logger.info(f"명령 수신: type={msg_type}")
 
         if msg_type == 'ping':
             await websocket.send(json.dumps({'type': 'pong'}))
@@ -567,8 +568,9 @@ class WellcomAgent:
                 quality=self.config.thumbnail_quality,
             )
             await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
+            logger.debug(f"썸네일 전송 완료: {len(jpeg_data)}B")
         except Exception as e:
-            logger.debug(f"썸네일 전송 실패: {e}")
+            logger.error(f"썸네일 전송 실패: {type(e).__name__}: {e}")
 
     async def _stream_loop(self, websocket, fps: int, quality: int):
         """화면 스트리밍 루프"""

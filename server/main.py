@@ -34,6 +34,10 @@ from models import (
     ManagerRegister, ManagerHeartbeat, ManagerResponse,
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+)
 logger = logging.getLogger("ws_relay")
 
 app = FastAPI(title="WellcomSOFT API", version="1.0.0")
@@ -643,7 +647,9 @@ async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
                         continue
 
                     target_agent = data.pop("target_agent", None)
+                    msg_cmd = data.get("type", "?")
                     if not target_agent:
+                        logger.debug(f"[Relay M→A] target_agent 없음: type={msg_cmd}")
                         continue
 
                     # 해당 에이전트에 전달
@@ -651,8 +657,11 @@ async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
                     if agent_ws:
                         try:
                             await agent_ws.send_text(json.dumps(data))
-                        except Exception:
-                            pass
+                            logger.info(f"[Relay M→A] type={msg_cmd} → {target_agent}")
+                        except Exception as e:
+                            logger.warning(f"[Relay M→A] 전달 실패: {e}")
+                    else:
+                        logger.warning(f"[Relay M→A] 에이전트 없음: {target_agent} (등록: {list(_ws_agents.get(owner_id, {}).keys())})")
 
                 elif "bytes" in message:
                     # 바이너리 메시지 — 앞 32바이트 = agent_id
@@ -667,8 +676,11 @@ async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
                     if agent_ws:
                         try:
                             await agent_ws.send_bytes(payload)
-                        except Exception:
-                            pass
+                            logger.info(f"[Relay M→A] binary ({len(payload)}B) → {target_agent}")
+                        except Exception as e:
+                            logger.warning(f"[Relay M→A] 바이너리 전달 실패: {e}")
+                    else:
+                        logger.warning(f"[Relay M→A] 바이너리 에이전트 없음: {target_agent}")
 
             elif msg_type == "websocket.disconnect":
                 break
@@ -765,11 +777,13 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                     except json.JSONDecodeError:
                         continue
 
+                    msg_cmd = data.get("type", "?")
                     data["source_agent"] = agent_id
                     try:
                         await mgr_ws.send_text(json.dumps(data))
-                    except Exception:
-                        pass
+                        logger.info(f"[Relay A→M] type={msg_cmd} ← {agent_id}")
+                    except Exception as e:
+                        logger.warning(f"[Relay A→M] 전달 실패: {e}")
 
                 elif "bytes" in message:
                     # 바이너리 메시지 — agent_id(32) 프리픽스 추가
@@ -777,8 +791,9 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                     prefixed = _pad_agent_id(agent_id) + raw_bytes
                     try:
                         await mgr_ws.send_bytes(prefixed)
-                    except Exception:
-                        pass
+                        logger.info(f"[Relay A→M] binary ({len(raw_bytes)}B) ← {agent_id}")
+                    except Exception as e:
+                        logger.warning(f"[Relay A→M] 바이너리 전달 실패: {e}")
 
             elif msg_type == "websocket.disconnect":
                 break
@@ -817,8 +832,4 @@ if __name__ == "__main__":
     import uvicorn
     from config import API_HOST, API_PORT
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-    )
     uvicorn.run(app, host=API_HOST, port=API_PORT)

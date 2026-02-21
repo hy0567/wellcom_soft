@@ -162,6 +162,11 @@ class AgentServer(QObject):
 
     def request_thumbnail(self, agent_id: str):
         """썸네일 요청"""
+        if agent_id in self._connected_agents:
+            logger.debug(f"[AgentServer] 썸네일 요청: {agent_id}")
+        else:
+            logger.warning(f"[AgentServer] 썸네일 요청 실패 — {agent_id} 미연결")
+            return
         self._send_to_agent(agent_id, {'type': 'request_thumbnail'})
 
     def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
@@ -280,10 +285,12 @@ class AgentServer(QObject):
         target_agent 필드를 추가하여 서버가 올바른 에이전트에 전달.
         """
         if not self._ws or not self._loop or not self._loop.is_running():
+            logger.warning(f"[AgentServer] 전송 실패 — WS 미연결 (type={msg_dict.get('type')})")
             return
 
         msg_dict['target_agent'] = agent_id
         msg = json.dumps(msg_dict)
+        logger.debug(f"[AgentServer] 전송: type={msg_dict.get('type')}, target={agent_id}")
         asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
 
     def _send_binary_to_agent(self, agent_id: str, data: bytes):
@@ -388,7 +395,7 @@ class AgentServer(QObject):
                                 logger.info(f"[AgentServer] 수신 #{msg_count}: text ({len(message)}B)")
                             self._handle_text_message(message)
                         elif isinstance(message, bytes):
-                            logger.debug(f"[AgentServer] 수신 #{msg_count}: binary ({len(message)}B)")
+                            logger.info(f"[AgentServer] 수신 #{msg_count}: binary ({len(message)}B)")
                             self._handle_binary_message(message)
 
                     logger.info(f"[AgentServer] 메시지 루프 종료 (총 {msg_count}개 수신)")

@@ -176,7 +176,10 @@ class GridView(QScrollArea):
 
     def _request_all_thumbnails(self):
         """온라인 PC들에 썸네일 요청"""
-        for pc in self.pc_manager.get_online_pcs():
+        online_pcs = self.pc_manager.get_online_pcs()
+        if online_pcs:
+            logger.info(f"[GridView] 썸네일 요청: {[pc.name for pc in online_pcs]}")
+        for pc in online_pcs:
             if not pc.is_streaming:  # 스트리밍 중인 PC는 스킵
                 self.agent_server.request_thumbnail(pc.agent_id)
 
