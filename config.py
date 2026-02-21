@@ -132,7 +132,7 @@ class Settings:
             'skip_version': ''
         },
         'server': {
-            'api_url': 'http://log.wellcomll.org:8000',
+            'api_url': 'http://log.wellcomll.org:4797',
             'token': '',
             'username': '',
             'auto_login': False

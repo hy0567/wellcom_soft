@@ -845,22 +845,62 @@ def main():
 
 
 def _run_splash_update(logger):
-    """PyQt6 스플래시로 업데이트 확인/적용
+    """자동 업데이트 확인/적용
 
-    스플래시용 QApplication은 완료 후 정리하여
-    main.py에서 새 QApplication을 생성할 수 있도록 함.
+    업데이트가 있을 때만 PyQt6 스플래시를 표시.
+    업데이트가 없으면 스플래시 없이 바로 앱 실행으로 진행 (빠른 시작).
     """
+    # 먼저 업데이트 유무만 빠르게 확인 (스플래시 없이)
+    try:
+        import requests as _req
+        _HAS_REQ = True
+    except ImportError:
+        _HAS_REQ = False
+
+    has_update = False
+    latest_version = ""
+    current_version = _get_installed_version()
+
+    try:
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        headers = {"Accept": "application/vnd.github+json"}
+
+        if _HAS_REQ:
+            resp = _req.get(api_url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                latest_version = data.get("tag_name", "").lstrip("v")
+                if latest_version and _compare_versions(current_version, latest_version):
+                    has_update = True
+        else:
+            import urllib.request, ssl
+            req = urllib.request.Request(api_url, headers=headers)
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                latest_version = data.get("tag_name", "").lstrip("v")
+                if latest_version and _compare_versions(current_version, latest_version):
+                    has_update = True
+    except Exception as e:
+        logger.debug(f"업데이트 확인 실패 (네트워크): {e}")
+        return  # 네트워크 오류 — 스킵
+
+    if not has_update:
+        logger.info(f"최신 버전 (v{current_version}) — 스플래시 없이 바로 시작")
+        return
+
+    # 업데이트 있음 → 스플래시 UI로 다운로드/적용
+    logger.info(f"업데이트 발견: v{current_version} → v{latest_version}")
+
     try:
         from PyQt6.QtWidgets import QApplication
 
-        # 스플래시 전용 QApplication
         splash_app = QApplication(sys.argv)
         splash_app.setStyle('Fusion')
 
         UpdateSplashDialog = _create_splash_ui()
         splash = UpdateSplashDialog()
 
-        # 화면 중앙 배치
         screen = splash_app.primaryScreen()
         if screen:
             geo = screen.geometry()
@@ -874,9 +914,9 @@ def _run_splash_update(logger):
 
         result = splash.result
         if result.get('updated'):
-            logger.info(f"스플래시 업데이트 적용: v{result['current']} → v{result['latest']}")
+            logger.info(f"업데이트 적용: v{result['current']} → v{result['latest']}")
         else:
-            logger.info(f"스플래시: 업데이트 없음 (v{result.get('current', '?')})")
+            logger.info(f"업데이트 적용 실패 (기존 버전으로 계속)")
 
         # QApplication 정리 (main.py에서 새로 생성할 수 있도록)
         del splash

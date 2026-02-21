@@ -121,6 +121,7 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._logged_in = False
+        self._auto_login_pending = False  # exec() 후 자동 로그인 시도
         self._init_ui()
         self._load_saved()
 
@@ -259,11 +260,23 @@ class LoginDialog(QDialog):
         # api_client의 base_url을 기본값으로 동기화
         api_client._base_url = settings.get('server.api_url', DEFAULT_API_URL)
 
-        # 자동 로그인 시도
+        # 자동 로그인: exec() 후 시도 (생성자에서 accept() 호출하면 동작 불안정)
         if auto_login and username:
             token = settings.get('server.token', '')
             if token:
-                self._try_auto_login()
+                self._auto_login_pending = True
+
+    def showEvent(self, event):
+        """다이얼로그 표시 후 자동 로그인 시도
+
+        생성자에서 accept()을 호출하면 exec() 전이라 동작이 불안정하므로,
+        showEvent에서 QTimer.singleShot(0)으로 이벤트 루프 시작 후 시도.
+        """
+        super().showEvent(event)
+        if self._auto_login_pending:
+            self._auto_login_pending = False
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, self._try_auto_login)
 
     def _try_auto_login(self):
         """저장된 토큰으로 자동 로그인 시도"""
@@ -272,8 +285,10 @@ class LoginDialog(QDialog):
                 self._logged_in = True
                 logger.info("자동 로그인 성공")
                 self.accept()
+                return
         except Exception:
             pass
+        logger.debug("자동 로그인 실패 — 수동 로그인 대기")
 
     def _do_login(self):
         """로그인 실행"""
@@ -300,6 +315,8 @@ class LoginDialog(QDialog):
 
             # 자동 로그인 설정 저장
             settings.set('server.auto_login', self.auto_login_cb.isChecked())
+            # api_url도 저장 (다음 시작 시 auto_login에서 올바른 URL 사용)
+            settings.set('server.api_url', api_client._base_url)
 
             logger.info(f"로그인 성공: {username}")
             self.accept()
