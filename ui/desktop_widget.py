@@ -197,15 +197,15 @@ class DesktopWidget(QMainWindow):
         self._is_fullscreen = False
         self._normal_geometry = None
 
-        # 마우스 이동 이벤트 쓰로틀링 (부드러움 개선)
+        # 마우스 이동 이벤트 쓰로틀링 (서버 릴레이 고려)
         self._last_mouse_move_time = 0.0
-        self._mouse_move_interval = 0.016  # ~60fps 마우스 이동 제한
+        self._mouse_move_interval = 0.033  # ~30fps 마우스 이동 제한 (릴레이 최적)
 
-        # v2.0.1 — 상태 추적
+        # v2.0.7 — 1:1 제어 품질 향상 (LinkIO 참고: 60fps/8Mbps)
         self._frame_count = 0
         self._current_fps = 0
-        self._current_quality = settings.get('screen.stream_quality', 60)
-        self._current_target_fps = settings.get('screen.stream_fps', 15)
+        self._current_quality = settings.get('screen.stream_quality', 70)
+        self._current_target_fps = settings.get('screen.stream_fps', 30)
         self._is_stretch = False   # 화면 비율 모드
 
         # v2.0.2 — H.264 디코더

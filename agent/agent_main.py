@@ -697,33 +697,75 @@ class WellcomAgent:
             logger.info("스트리밍 중지")
 
     async def _stream_mjpeg(self, websocket):
-        """MJPEG 스트리밍 루프 (기존 방식)"""
+        """MJPEG 스트리밍 루프
+
+        서버 릴레이 대역폭을 고려하여 적절한 해상도 스케일링.
+        에러 복구 포함.
+        """
+        screen_w, screen_h = self.screen_capture.screen_size
+        # 1080p 이상이면 720p로 다운스케일 (대역폭 최적화)
+        if screen_w > 1280:
+            scale = 1280 / screen_w
+        else:
+            scale = 1.0
+
+        logger.info(f"MJPEG 스트리밍: {screen_w}x{screen_h} "
+                     f"→ scale={scale:.2f}, Q={self._stream_quality}, "
+                     f"{self._stream_fps}fps")
+
+        consecutive_errors = 0
         while self._streaming and self._running:
-            jpeg_data = self.screen_capture.capture_jpeg(
-                quality=self._stream_quality,
-            )
-            await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
-            interval = 1.0 / max(1, self._stream_fps)
-            await asyncio.sleep(interval)
+            try:
+                jpeg_data = self.screen_capture.capture_jpeg(
+                    quality=self._stream_quality,
+                    scale=scale,
+                )
+                if jpeg_data:
+                    await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                    consecutive_errors = 0
+
+                interval = 1.0 / max(1, self._stream_fps)
+                await asyncio.sleep(interval)
+            except websockets.exceptions.ConnectionClosed:
+                raise
+            except Exception as e:
+                consecutive_errors += 1
+                logger.debug(f"MJPEG 프레임 전송 오류: {e}")
+                if consecutive_errors >= 10:
+                    logger.warning("MJPEG 연속 에러 10회 — 스트리밍 중단")
+                    break
+                await asyncio.sleep(0.1)
 
     async def _stream_h264(self, websocket):
         """H.264 스트리밍 루프 (v2.0.2)"""
+        consecutive_errors = 0
         while self._streaming and self._running:
-            # PIL Image 캡처 (JPEG 안 거침)
-            pil_image = self.screen_capture.capture_raw()
-            if pil_image is None:
+            try:
+                # PIL Image 캡처 (JPEG 안 거침)
+                pil_image = self.screen_capture.capture_raw()
+                if pil_image is None:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # H.264 인코딩
+                packets = self._h264_encoder.encode_frame(pil_image)
+
+                for is_keyframe, nal_data in packets:
+                    header = HEADER_H264_KEYFRAME if is_keyframe else HEADER_H264_DELTA
+                    await websocket.send(bytes([header]) + nal_data)
+
+                consecutive_errors = 0
+                interval = 1.0 / max(1, self._stream_fps)
+                await asyncio.sleep(interval)
+            except websockets.exceptions.ConnectionClosed:
+                raise
+            except Exception as e:
+                consecutive_errors += 1
+                logger.debug(f"H.264 프레임 전송 오류: {e}")
+                if consecutive_errors >= 10:
+                    logger.warning("H.264 연속 에러 10회 — 스트리밍 중단")
+                    break
                 await asyncio.sleep(0.1)
-                continue
-
-            # H.264 인코딩
-            packets = self._h264_encoder.encode_frame(pil_image)
-
-            for is_keyframe, nal_data in packets:
-                header = HEADER_H264_KEYFRAME if is_keyframe else HEADER_H264_DELTA
-                await websocket.send(bytes([header]) + nal_data)
-
-            interval = 1.0 / max(1, self._stream_fps)
-            await asyncio.sleep(interval)
 
     async def _execute_command(self, websocket, command: str):
         """원격 명령 실행"""
