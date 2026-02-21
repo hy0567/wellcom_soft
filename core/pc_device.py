@@ -25,6 +25,10 @@ class PCInfo:
     mac_address: str = ""
     screen_width: int = 1920
     screen_height: int = 1080
+    memo: str = ""          # 메모 필드 (LinkIO list.json의 memo)
+    public_ip: str = ""     # 공인 IP (LinkIO의 Ip1)
+    keymap_name: str = ""   # 지정된 키매핑 이름
+    script_name: str = ""   # 지정된 스크립트 이름
 
 
 class PCDevice:
@@ -66,23 +70,19 @@ class PCDevice:
 
     @property
     def is_online(self) -> bool:
-        return self.status == PCStatus.ONLINE
+        return self.status == PCStatus.ONLINE and self.agent_ws is not None
 
     def update_thumbnail(self, jpeg_data: bytes):
         """썸네일 이미지 업데이트"""
         self.last_thumbnail = jpeg_data
         self.thumbnail_time = time.time()
 
-    def mark_online(self, ws=None, remote_ip: str = ''):
-        """에이전트 연결됨
-
-        릴레이 모드에서는 ws=None (서버가 중계).
-        """
+    def mark_online(self, ws, remote_ip: str):
+        """에이전트 연결됨"""
         self.agent_ws = ws
         self.status = PCStatus.ONLINE
         self.last_seen = time.time()
-        if remote_ip:
-            self.info.ip = remote_ip
+        self.info.ip = remote_ip
 
     def mark_offline(self):
         """에이전트 연결 해제"""

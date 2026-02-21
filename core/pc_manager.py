@@ -1,7 +1,6 @@
 """다중 PC 관리자
 
-에이전트 연결 관리자와 데이터베이스를 조합하여 다수의 원격 PC를 관리한다.
-매니저가 각 에이전트 PC에 직접 WS 클라이언트로 접속하는 아키텍처.
+에이전트 서버와 데이터베이스를 조합하여 다수의 원격 PC를 관리한다.
 """
 
 import re
@@ -66,6 +65,10 @@ class PCManager:
                     mac_address=row.get('mac_address', ''),
                     screen_width=row.get('screen_width', 1920),
                     screen_height=row.get('screen_height', 1080),
+                    memo=row.get('memo', ''),
+                    public_ip=row.get('public_ip', ''),
+                    keymap_name=row.get('keymap_name', ''),
+                    script_name=row.get('script_name', ''),
                 )
                 pc = PCDevice(info)
                 self.pcs[row['name']] = pc
@@ -120,8 +123,7 @@ class PCManager:
                         screen_height=agent_data.get('screen_height', 1080),
                     )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
-                    # 서버의 is_online 상태 반영
-                    # (에이전트가 매니저 WS에 접속하면 _on_agent_connected에서 ONLINE 처리)
+                    # 서버의 is_online 상태 반영 (WebSocket 미연결 시)
                     if agent_data.get('is_online') and not existing_pc.is_online:
                         existing_pc.status = PCStatus.CONNECTING
                 else:
@@ -151,10 +153,6 @@ class PCManager:
                             )
                     except Exception:
                         pass
-
-                    # 에이전트가 매니저 WS에 접속하면 _on_agent_connected에서 ONLINE 처리
-                    if agent_data.get('is_online') and info.ip:
-                        pc.status = PCStatus.CONNECTING
 
         self.signals.devices_reloaded.emit()
         logger.info(f"서버에서 {len(agents)}개 에이전트 동기화 완료")
@@ -284,10 +282,7 @@ class PCManager:
     # ==================== 에이전트 이벤트 핸들러 ====================
 
     def _on_agent_connected(self, agent_id: str, ip: str):
-        """에이전트 연결 → PC 상태 ONLINE
-
-        릴레이 모드: 서버가 중계하므로 직접 ws 참조 없음 (ws=None).
-        """
+        """에이전트 연결 → PC 상태 ONLINE"""
         pc = self.get_pc_by_agent_id(agent_id)
 
         if not pc:
@@ -312,15 +307,17 @@ class PCManager:
             if not pc:
                 return
 
+        # agent_server의 websocket 참조 가져오기
+        ws = self.agent_server._agents.get(agent_id)
+
         with self._lock:
-            # 릴레이 모드에서는 ws=None (서버가 중계)
-            pc.mark_online(remote_ip=ip)
+            pc.mark_online(ws, ip)
 
             # DB에 IP 업데이트
             db_row = self.db.get_pc_by_name(pc.name)
             if db_row:
                 info = self.agent_server.get_agent_info(agent_id)
-                update_kwargs = {'ip': ip} if ip else {}
+                update_kwargs = {'ip': ip}
                 if info:
                     if info.get('hostname'):
                         update_kwargs['hostname'] = info['hostname']
@@ -330,8 +327,7 @@ class PCManager:
                         update_kwargs['screen_width'] = info['screen_width']
                     if info.get('screen_height'):
                         update_kwargs['screen_height'] = info['screen_height']
-                if update_kwargs:
-                    self.db.update_pc(db_row['id'], **update_kwargs)
+                self.db.update_pc(db_row['id'], **update_kwargs)
 
         self.signals.device_status_changed.emit(pc.name)
         logger.info(f"PC 온라인: {pc.name} ({ip})")

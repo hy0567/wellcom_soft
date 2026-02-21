@@ -1,0 +1,458 @@
+"""DesktopWidget — 별도 창 원격 뷰어
+
+LinkIO Desktop의 DesktopWidget 재현.
+탭이 아닌 독립 QMainWindow로 열리며, 전체화면/사이드메뉴/단축키를 지원.
+"""
+
+import logging
+import os
+from typing import Optional
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QFileDialog, QInputDialog,
+    QMessageBox, QApplication,
+)
+from PyQt6.QtCore import Qt, QByteArray, pyqtSignal, QTimer
+from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent
+
+from config import settings
+from core.pc_device import PCDevice
+from core.agent_server import AgentServer
+from core.multi_control import MultiControlManager
+from ui.side_menu import SideMenu
+
+logger = logging.getLogger(__name__)
+
+# Qt 키코드 → 키 이름 매핑
+_QT_KEY_MAP = {
+    Qt.Key.Key_Return: 'enter', Qt.Key.Key_Enter: 'enter',
+    Qt.Key.Key_Tab: 'tab', Qt.Key.Key_Space: 'space',
+    Qt.Key.Key_Backspace: 'backspace', Qt.Key.Key_Delete: 'delete',
+    Qt.Key.Key_Escape: 'escape',
+    Qt.Key.Key_Up: 'up', Qt.Key.Key_Down: 'down',
+    Qt.Key.Key_Left: 'left', Qt.Key.Key_Right: 'right',
+    Qt.Key.Key_Home: 'home', Qt.Key.Key_End: 'end',
+    Qt.Key.Key_PageUp: 'pageup', Qt.Key.Key_PageDown: 'pagedown',
+    Qt.Key.Key_Insert: 'insert',
+    Qt.Key.Key_F1: 'f1', Qt.Key.Key_F2: 'f2', Qt.Key.Key_F3: 'f3',
+    Qt.Key.Key_F4: 'f4', Qt.Key.Key_F5: 'f5', Qt.Key.Key_F6: 'f6',
+    Qt.Key.Key_F7: 'f7', Qt.Key.Key_F8: 'f8', Qt.Key.Key_F9: 'f9',
+    Qt.Key.Key_F10: 'f10', Qt.Key.Key_F11: 'f11', Qt.Key.Key_F12: 'f12',
+    Qt.Key.Key_CapsLock: 'capslock', Qt.Key.Key_NumLock: 'numlock',
+    Qt.Key.Key_ScrollLock: 'scrolllock', Qt.Key.Key_Print: 'printscreen',
+    Qt.Key.Key_Pause: 'pause', Qt.Key.Key_Menu: 'menu',
+}
+
+
+class RemoteScreenWidget(QWidget):
+    """원격 화면 렌더링 위젯 (최적화)"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = QPixmap()
+        self._scaled_pixmap = QPixmap()  # 스케일 캐시
+        self._scale = 1.0
+        self._offset_x = 0
+        self._offset_y = 0
+        self._last_widget_size = (0, 0)
+        self.setMinimumSize(640, 480)
+        self.setStyleSheet("background-color: #000;")
+
+        # 더블 버퍼링 활성화
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+    @property
+    def current_pixmap(self) -> QPixmap:
+        return self._pixmap
+
+    def update_frame(self, jpeg_data: bytes):
+        """JPEG 프레임 업데이트"""
+        self._pixmap.loadFromData(QByteArray(jpeg_data))
+        self._rebuild_scaled()
+        self.update()
+
+    def _rebuild_scaled(self):
+        """스케일된 이미지 캐시 재생성"""
+        if self._pixmap.isNull():
+            return
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        ww, wh = self.width(), self.height()
+        if ww <= 0 or wh <= 0:
+            return
+        self._scale = min(ww / pw, wh / ph)
+        scaled_w = int(pw * self._scale)
+        scaled_h = int(ph * self._scale)
+        self._offset_x = (ww - scaled_w) // 2
+        self._offset_y = (wh - scaled_h) // 2
+
+        # FastTransformation → 빠른 렌더링 (부드러움 우선)
+        self._scaled_pixmap = self._pixmap.scaled(
+            ww, wh,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self._last_widget_size = (ww, wh)
+
+    def map_to_remote(self, local_x: int, local_y: int, screen_w: int, screen_h: int):
+        """로컬 좌표 → 원격 좌표"""
+        if self._pixmap.isNull() or self._scale == 0:
+            return 0, 0
+        rx = int((local_x - self._offset_x) / self._scale)
+        ry = int((local_y - self._offset_y) / self._scale)
+        return max(0, min(rx, screen_w - 1)), max(0, min(ry, screen_h - 1))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        if not self._scaled_pixmap.isNull():
+            x = (self.width() - self._scaled_pixmap.width()) // 2
+            y = (self.height() - self._scaled_pixmap.height()) // 2
+            painter.drawPixmap(x, y, self._scaled_pixmap)
+
+    def resizeEvent(self, event):
+        new_size = (self.width(), self.height())
+        if new_size != self._last_widget_size:
+            self._rebuild_scaled()
+        super().resizeEvent(event)
+
+
+class DesktopWidget(QMainWindow):
+    """별도 창 원격 뷰어 (LinkIO DesktopWidget 재현)"""
+
+    # 시그널
+    closed = pyqtSignal(str)                # pc_name
+    navigate_request = pyqtSignal(str, int) # pc_name, direction (-1=prev, +1=next)
+
+    def __init__(self, pc: PCDevice, agent_server: AgentServer,
+                 multi_control: Optional[MultiControlManager] = None,
+                 pc_list: list = None):
+        super().__init__()
+        self._pc = pc
+        self._server = agent_server
+        self._multi_control = multi_control
+        self._pc_list = pc_list or []   # 전체 PC 이름 목록 (방향키 전환용)
+
+        self._is_fullscreen = False
+        self._normal_geometry = None
+
+        # 마우스 이동 이벤트 쓰로틀링 (부드러움 개선)
+        self._last_mouse_move_time = 0.0
+        self._mouse_move_interval = 0.016  # ~60fps 마우스 이동 제한
+
+        self._init_ui()
+        self._connect_signals()
+        self._load_geometry()
+
+        # 스트리밍 시작
+        self._server.start_streaming(
+            pc.agent_id,
+            fps=settings.get('screen.stream_fps', 15),
+            quality=settings.get('screen.stream_quality', 60),
+        )
+
+        # 팝업 스타일: 독립 창으로 최상위에 활성화
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.raise_()
+        self.activateWindow()
+
+    @property
+    def pc_name(self) -> str:
+        return self._pc.name
+
+    def _init_ui(self):
+        self.setWindowTitle(f"제어: {self._pc.name}")
+        self.setMinimumSize(800, 600)
+
+        # 중앙 위젯
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 원격 화면
+        self._screen = RemoteScreenWidget()
+        self._screen.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._screen.setMouseTracking(True)
+        layout.addWidget(self._screen, 1)
+
+        # 사이드 메뉴
+        self._side_menu = SideMenu()
+        self._side_menu.fullscreen_clicked.connect(self.toggle_fullscreen)
+        self._side_menu.clipboard_sync_clicked.connect(self._sync_clipboard)
+        self._side_menu.file_send_clicked.connect(self._send_file)
+        self._side_menu.screenshot_clicked.connect(self._save_screenshot)
+        self._side_menu.command_clicked.connect(self._execute_command)
+        self._side_menu.close_clicked.connect(self.close)
+
+        if settings.get('desktop_widget.side_menu', True):
+            layout.addWidget(self._side_menu)
+        else:
+            self._side_menu.hide()
+
+        # 키보드/마우스 이벤트를 screen 위젯에서 캡처
+        self._screen.installEventFilter(self)
+
+    def _connect_signals(self):
+        self._server.screen_frame_received.connect(self._on_frame_received)
+
+    def _load_geometry(self):
+        """저장된 창 위치/크기 복원"""
+        x = settings.get('desktop_widget.x', 100)
+        y = settings.get('desktop_widget.y', 100)
+        w = settings.get('desktop_widget.width', 960)
+        h = settings.get('desktop_widget.height', 640)
+        self.setGeometry(x, y, w, h)
+
+        if settings.get('desktop_widget.fullscreen', False):
+            QTimer.singleShot(100, self.toggle_fullscreen)
+
+    def _save_geometry(self):
+        """창 위치/크기 저장"""
+        if not self._is_fullscreen:
+            geo = self.geometry()
+            settings.set('desktop_widget.x', geo.x(), auto_save=False)
+            settings.set('desktop_widget.y', geo.y(), auto_save=False)
+            settings.set('desktop_widget.width', geo.width(), auto_save=False)
+            settings.set('desktop_widget.height', geo.height(), auto_save=False)
+            settings.save()
+
+    # ==================== 프레임 수신 ====================
+
+    def _on_frame_received(self, agent_id: str, jpeg_data: bytes):
+        if agent_id != self._pc.agent_id:
+            return
+        self._screen.update_frame(jpeg_data)
+
+    # ==================== 전체화면 ====================
+
+    def toggle_fullscreen(self):
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+            self.showNormal()
+            if self._normal_geometry:
+                self.setGeometry(self._normal_geometry)
+            self._side_menu.show()
+        else:
+            self._normal_geometry = self.geometry()
+            self._is_fullscreen = True
+            self._side_menu.hide()
+            self.showFullScreen()
+
+    # ==================== 사이드 메뉴 액션 ====================
+
+    def _sync_clipboard(self):
+        """클립보드 동기화 요청"""
+        self._server._send_to_agent(self._pc.agent_id, {'type': 'get_clipboard'})
+
+    def _send_file(self):
+        """파일 전송"""
+        path, _ = QFileDialog.getOpenFileName(self, "파일 선택")
+        if path:
+            self._server.send_file(self._pc.agent_id, path)
+
+    def _save_screenshot(self):
+        """현재 화면 스크린샷 저장"""
+        pixmap = self._screen.current_pixmap
+        if pixmap.isNull():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "스크린샷 저장", f"{self._pc.name}_screenshot.png",
+            "PNG (*.png);;JPEG (*.jpg)"
+        )
+        if path:
+            pixmap.save(path)
+
+    def _execute_command(self):
+        """원격 명령 실행"""
+        cmd, ok = QInputDialog.getText(self, "명령 실행", "명령어:")
+        if ok and cmd.strip():
+            self._server.execute_command(self._pc.agent_id, cmd.strip())
+
+    # ==================== 키보드/마우스 이벤트 ====================
+
+    def eventFilter(self, obj, event):
+        """screen 위젯의 이벤트 필터"""
+        if obj != self._screen:
+            return False
+
+        from PyQt6.QtCore import QEvent
+
+        if event.type() == QEvent.Type.KeyPress:
+            self._on_key_press(event)
+            return True
+        elif event.type() == QEvent.Type.KeyRelease:
+            self._on_key_release(event)
+            return True
+        elif event.type() == QEvent.Type.MouseButtonPress:
+            self._on_mouse_press(event)
+            return True
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            self._on_mouse_release(event)
+            return True
+        elif event.type() == QEvent.Type.MouseMove:
+            self._on_mouse_move(event)
+            return True
+        elif event.type() == QEvent.Type.MouseButtonDblClick:
+            self._on_mouse_double_click(event)
+            return True
+        elif event.type() == QEvent.Type.Wheel:
+            self._on_wheel(event)
+            return True
+
+        return False
+
+    def _on_key_press(self, event: QKeyEvent):
+        key = self._resolve_key(event)
+        if not key:
+            return
+
+        # F11 = 전체화면 토글 (로컬 처리)
+        if key == 'f11':
+            self.toggle_fullscreen()
+            return
+
+        # 전체화면 시 ←→ = PC 전환
+        if self._is_fullscreen and key in ('left', 'right') and not self._get_modifiers(event):
+            direction = -1 if key == 'left' else 1
+            self.navigate_request.emit(self._pc.name, direction)
+            return
+
+        mods = self._get_modifiers(event)
+        if key in ('ctrl', 'shift', 'alt', 'meta'):
+            mods = []
+
+        # 멀컨 모드면 모든 선택 PC에 전달
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_key_event(key, 'press', mods)
+        else:
+            self._server.send_key_event(self._pc.agent_id, key, 'press', mods)
+
+    def _on_key_release(self, event: QKeyEvent):
+        key = self._resolve_key(event)
+        if not key or key == 'f11':
+            return
+
+        mods = self._get_modifiers(event)
+        if key in ('ctrl', 'shift', 'alt', 'meta'):
+            mods = []
+
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_key_event(key, 'release', mods)
+        else:
+            self._server.send_key_event(self._pc.agent_id, key, 'release', mods)
+
+    def _on_mouse_press(self, event: QMouseEvent):
+        x, y = self._map_mouse(event)
+        button = self._button_name(event.button())
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_mouse_event(x, y, button, 'press')
+        else:
+            self._server.send_mouse_event(self._pc.agent_id, x, y, button, 'press')
+
+    def _on_mouse_release(self, event: QMouseEvent):
+        x, y = self._map_mouse(event)
+        button = self._button_name(event.button())
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_mouse_event(x, y, button, 'release')
+        else:
+            self._server.send_mouse_event(self._pc.agent_id, x, y, button, 'release')
+
+    def _on_mouse_move(self, event: QMouseEvent):
+        # 쓰로틀링: 너무 빈번한 마우스 이동은 무시 → 부드러움 개선
+        import time
+        now = time.time()
+        if now - self._last_mouse_move_time < self._mouse_move_interval:
+            return
+        self._last_mouse_move_time = now
+
+        x, y = self._map_mouse(event)
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_mouse_event(x, y, 'none', 'move')
+        else:
+            self._server.send_mouse_event(self._pc.agent_id, x, y, 'none', 'move')
+
+    def _on_mouse_double_click(self, event: QMouseEvent):
+        x, y = self._map_mouse(event)
+        button = self._button_name(event.button())
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_mouse_event(x, y, button, 'double_click')
+        else:
+            self._server.send_mouse_event(self._pc.agent_id, x, y, button, 'double_click')
+
+    def _on_wheel(self, event: QWheelEvent):
+        x, y = self._screen.map_to_remote(
+            int(event.position().x()), int(event.position().y()),
+            self._pc.info.screen_width, self._pc.info.screen_height,
+        )
+        delta = event.angleDelta().y() // 120
+        if self._multi_control and self._multi_control.is_active:
+            self._multi_control.broadcast_mouse_event(x, y, 'none', 'scroll', delta)
+        else:
+            self._server.send_mouse_event(self._pc.agent_id, x, y, 'none', 'scroll', delta)
+
+    def _map_mouse(self, event: QMouseEvent):
+        return self._screen.map_to_remote(
+            int(event.position().x()), int(event.position().y()),
+            self._pc.info.screen_width, self._pc.info.screen_height,
+        )
+
+    # ==================== 유틸리티 ====================
+
+    @staticmethod
+    def _resolve_key(event: QKeyEvent) -> Optional[str]:
+        qt_key = event.key()
+        if qt_key in (Qt.Key.Key_Control, Qt.Key.Key_Meta):
+            return 'ctrl'
+        if qt_key == Qt.Key.Key_Shift:
+            return 'shift'
+        if qt_key == Qt.Key.Key_Alt:
+            return 'alt'
+        if qt_key in _QT_KEY_MAP:
+            return _QT_KEY_MAP[qt_key]
+        text = event.text()
+        if text and len(text) == 1:
+            return text
+        return None
+
+    @staticmethod
+    def _get_modifiers(event) -> list:
+        mods = []
+        flags = event.modifiers()
+        if flags & Qt.KeyboardModifier.ControlModifier:
+            mods.append('ctrl')
+        if flags & Qt.KeyboardModifier.ShiftModifier:
+            mods.append('shift')
+        if flags & Qt.KeyboardModifier.AltModifier:
+            mods.append('alt')
+        if flags & Qt.KeyboardModifier.MetaModifier:
+            mods.append('meta')
+        return mods
+
+    @staticmethod
+    def _button_name(button) -> str:
+        if button == Qt.MouseButton.LeftButton:
+            return 'left'
+        elif button == Qt.MouseButton.RightButton:
+            return 'right'
+        elif button == Qt.MouseButton.MiddleButton:
+            return 'middle'
+        return 'none'
+
+    # ==================== 윈도우 이벤트 ====================
+
+    def closeEvent(self, event):
+        """닫기 시 스트리밍 중지 + 설정 저장"""
+        self._save_geometry()
+
+        # 스트리밍 중지
+        self._server.stop_streaming(self._pc.agent_id)
+
+        # 시그널 해제
+        try:
+            self._server.screen_frame_received.disconnect(self._on_frame_received)
+        except TypeError:
+            pass
+
+        self.closed.emit(self._pc.name)
+        event.accept()

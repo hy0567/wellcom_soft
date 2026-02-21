@@ -46,10 +46,22 @@ class Database:
                     group_name TEXT DEFAULT 'default',
                     screen_width INTEGER DEFAULT 1920,
                     screen_height INTEGER DEFAULT 1080,
+                    memo TEXT DEFAULT '',
+                    public_ip TEXT DEFAULT '',
+                    keymap_name TEXT DEFAULT '',
+                    script_name TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # 기존 DB 마이그레이션 — 새 컬럼 추가
+            self._migrate_columns(cursor, 'pcs', {
+                'memo': "TEXT DEFAULT ''",
+                'public_ip': "TEXT DEFAULT ''",
+                'keymap_name': "TEXT DEFAULT ''",
+                'script_name': "TEXT DEFAULT ''",
+            })
 
             # Groups table
             cursor.execute('''
@@ -70,6 +82,15 @@ class Database:
 
             conn.commit()
 
+    @staticmethod
+    def _migrate_columns(cursor, table: str, columns: dict):
+        """기존 테이블에 누락된 컬럼 추가 (마이그레이션)"""
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in cursor.fetchall()}
+        for col_name, col_def in columns.items():
+            if col_name not in existing:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+
     # ==================== PC CRUD ====================
 
     def add_pc(self, name: str, agent_id: str, ip: str = "",
@@ -87,7 +108,8 @@ class Database:
     def update_pc(self, pc_id: int, **kwargs):
         allowed_fields = [
             'name', 'agent_id', 'ip', 'hostname', 'os_info',
-            'mac_address', 'group_name', 'screen_width', 'screen_height'
+            'mac_address', 'group_name', 'screen_width', 'screen_height',
+            'memo', 'public_ip', 'keymap_name', 'script_name',
         ]
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:

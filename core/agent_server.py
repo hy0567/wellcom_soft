@@ -1,21 +1,7 @@
-"""다중 에이전트 WebSocket 릴레이 클라이언트 (매니저 측)
+"""다중 에이전트 WebSocket 서버
 
-매니저가 서버(log.wellcomll.org:4797)에 WS 클라이언트로 접속하면,
-서버가 같은 계정의 에이전트들과 매니저 사이의 메시지를 릴레이한다.
-포트포워딩 불필요.
-
-아키텍처:
-  매니저(이 코드) = WS 클라이언트 (서버/ws/manager?token=JWT 에 접속)
-  에이전트 = WS 클라이언트 (서버/ws/agent?token=JWT 에 접속)
-  서버 = REST API + WS 릴레이 (양쪽 메시지를 중계)
-
-메시지 프로토콜 (서버 릴레이 경유):
-  매니저→서버→에이전트:
-    JSON: {"type": "...", "target_agent": "DESKTOP-ABC", ...}
-    Binary: agent_id(32바이트) + 원본 데이터
-  에이전트→서버→매니저:
-    JSON: {"type": "...", "source_agent": "DESKTOP-ABC", ...}
-    Binary: agent_id(32바이트) + 원본 데이터 (0x01/0x02 + JPEG)
+관리PC에서 WebSocket 서버를 실행하고, 다수의 대상PC 에이전트가 연결해옴.
+역방향 연결: 대상PC(클라이언트) → 관리PC(서버)
 """
 
 import asyncio
@@ -35,32 +21,14 @@ try:
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
     WEBSOCKETS_AVAILABLE = False
-    logger.warning("websockets 미설치 — 에이전트 연결 기능 비활성화")
-
-# agent_id 패딩 길이 (서버와 동일)
-AGENT_ID_LEN = 32
-
-
-def _pad_agent_id(agent_id: str) -> bytes:
-    """agent_id를 32바이트로 패딩"""
-    return agent_id.encode('utf-8')[:AGENT_ID_LEN].ljust(AGENT_ID_LEN, b'\x00')
-
-
-def _unpad_agent_id(data: bytes) -> str:
-    """32바이트에서 agent_id 추출"""
-    return data[:AGENT_ID_LEN].rstrip(b'\x00').decode('utf-8', errors='replace')
+    logger.warning("websockets 미설치 — 에이전트 기능 비활성화")
 
 
 class AgentServer(QObject):
-    """매니저 측 WebSocket 릴레이 클라이언트
+    """다중 에이전트 WebSocket 서버 (관리PC 측)"""
 
-    서버(log.wellcomll.org:4797/ws/manager)에 WS 접속하여,
-    서버가 중계하는 에이전트 메시지를 수신/전송한다.
-    기존 시그널/명령 인터페이스 100% 유지.
-    """
-
-    # 시그널 (UI/PCManager에서 사용)
-    agent_connected = pyqtSignal(str, str)         # agent_id, agent_ip
+    # 시그널
+    agent_connected = pyqtSignal(str, str)         # agent_id, remote_ip
     agent_disconnected = pyqtSignal(str)            # agent_id
     thumbnail_received = pyqtSignal(str, bytes)     # agent_id, jpeg_data
     screen_frame_received = pyqtSignal(str, bytes)  # agent_id, jpeg_data
@@ -75,116 +43,69 @@ class AgentServer(QObject):
     HEADER_THUMBNAIL = 0x01
     HEADER_STREAM = 0x02
 
-    def __init__(self):
+    def __init__(self, port: int = 9877):
         super().__init__()
-        self._ws: Optional[object] = None              # 서버와의 websocket
-        self._server_url: str = ''                      # ws://서버/ws/manager?token=JWT
-        self._token: str = ''                           # JWT 토큰
-        self._connected_agents: set = set()             # 현재 연결된 agent_id 집합
-        self._agent_info: Dict[str, dict] = {}          # agent_id → {hostname, os_info, ip, ...}
+        self._port = port
+        self._agents: Dict[str, object] = {}  # agent_id → websocket
+        self._agent_info: Dict[str, dict] = {}  # agent_id → {hostname, os_info, ...}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._server = None
 
     @property
     def connected_count(self) -> int:
-        return len(self._connected_agents)
+        return len(self._agents)
 
     def get_connected_agents(self) -> List[str]:
-        return list(self._connected_agents)
+        return list(self._agents.keys())
 
     def is_agent_connected(self, agent_id: str) -> bool:
-        return agent_id in self._connected_agents
+        return agent_id in self._agents
 
     def get_agent_info(self, agent_id: str) -> Optional[dict]:
         return self._agent_info.get(agent_id)
 
-    # ==================== 수명주기 ====================
+    # ==================== 서버 수명주기 ====================
 
-    def start_connection(self, server_url: str, token: str):
-        """서버에 WS 클라이언트로 접속 시작
-
-        Args:
-            server_url: REST API 기본 URL (예: http://log.wellcomll.org:4797)
-            token: JWT 토큰
-        """
+    def start_server(self):
+        """WebSocket 서버 시작 (백그라운드 스레드)"""
         if not WEBSOCKETS_AVAILABLE:
-            logger.error("[AgentServer] websockets 미설치 — 접속 불가")
             return
 
         if self._thread and self._thread.is_alive():
-            logger.info("[AgentServer] 이미 접속 스레드 실행 중 — 스킵")
             return
-
-        # http(s) → ws(s) 변환
-        ws_url = server_url.replace('https://', 'wss://').replace('http://', 'ws://')
-        self._server_url = f"{ws_url}/ws/manager?token={token}"
-        self._token = token
-
-        # 토큰 일부만 로그 (보안)
-        token_preview = token[:20] + "..." if len(token) > 20 else token
-        logger.info(f"[AgentServer] 서버 URL: {server_url}")
-        logger.info(f"[AgentServer] WS URL: {ws_url}/ws/manager?token={token_preview}")
 
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name='AgentWSClient'
+            target=self._run_loop, daemon=True, name='AgentServer'
         )
         self._thread.start()
-        logger.info(f"[AgentServer] 서버 WS 접속 스레드 시작")
+        logger.info(f"[AgentServer] 시작: 포트 {self._port}")
 
-    def stop_connection(self):
-        """서버 WS 연결 종료"""
+    def stop_server(self):
+        """서버 중지"""
         self._stop_event.set()
 
-        if self._ws and self._loop and self._loop.is_running():
+        # 모든 에이전트 연결 종료
+        for agent_id, ws in list(self._agents.items()):
             try:
-                asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(ws.close(), self._loop)
             except Exception:
                 pass
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
 
-        self._connected_agents.clear()
+        self._agents.clear()
         self._agent_info.clear()
-
-    # 하위 호환: 기존 start_server / stop_server 이름 유지
-    def start_server(self):
-        """하위 호환 — start_connection을 사용하세요"""
-        logger.warning("[AgentServer] start_server() 호출됨 — start_connection() 사용 필요")
-
-    def stop_server(self):
-        """하위 호환 — stop_connection"""
-        self.stop_connection()
 
     # ==================== 에이전트에 명령 전송 ====================
 
     def request_thumbnail(self, agent_id: str):
-        """썸네일 요청 (단일)"""
-        if agent_id in self._connected_agents:
-            logger.debug(f"[AgentServer] 썸네일 요청: {agent_id}")
-        else:
-            logger.warning(f"[AgentServer] 썸네일 요청 실패 — {agent_id} 미연결")
-            return
+        """썸네일 요청"""
         self._send_to_agent(agent_id, {'type': 'request_thumbnail'})
-
-    def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
-        """에이전트가 주기적으로 썸네일을 자동 전송하도록 요청"""
-        if agent_id not in self._connected_agents:
-            return
-        self._send_to_agent(agent_id, {
-            'type': 'start_thumbnail_push',
-            'interval': interval,
-        })
-        logger.info(f"[AgentServer] 썸네일 push 시작 요청: {agent_id}, {interval}초 간격")
-
-    def stop_thumbnail_push(self, agent_id: str):
-        """에이전트 썸네일 자동 전송 중지"""
-        if agent_id not in self._connected_agents:
-            return
-        self._send_to_agent(agent_id, {'type': 'stop_thumbnail_push'})
-        logger.info(f"[AgentServer] 썸네일 push 중지 요청: {agent_id}")
 
     def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
         """전체 화면 스트리밍 시작"""
@@ -197,6 +118,17 @@ class AgentServer(QObject):
     def stop_streaming(self, agent_id: str):
         """스트리밍 중지"""
         self._send_to_agent(agent_id, {'type': 'stop_stream'})
+
+    def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
+        """썸네일 push 모드 시작 (에이전트가 주기적으로 전송)"""
+        self._send_to_agent(agent_id, {
+            'type': 'start_thumbnail_push',
+            'interval': interval,
+        })
+
+    def stop_thumbnail_push(self, agent_id: str):
+        """썸네일 push 모드 중지"""
+        self._send_to_agent(agent_id, {'type': 'stop_thumbnail_push'})
 
     def send_key_event(self, agent_id: str, key: str, action: str,
                        modifiers: list = None):
@@ -263,28 +195,30 @@ class AgentServer(QObject):
 
     def broadcast_key_event(self, agent_ids: List[str], key: str,
                             action: str, modifiers: list = None):
-        msg_dict = {
+        msg = json.dumps({
             'type': 'key_event',
             'key': key,
             'action': action,
             'modifiers': modifiers or [],
-        }
+        })
         for agent_id in agent_ids:
-            if agent_id in self._connected_agents:
-                self._send_to_agent(agent_id, msg_dict)
+            ws = self._agents.get(agent_id)
+            if ws and self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
 
     def broadcast_mouse_event(self, agent_ids: List[str], x: int, y: int,
                               button: str = 'none', action: str = 'move',
                               scroll_delta: int = 0):
-        msg_dict = {
+        msg = json.dumps({
             'type': 'mouse_event',
             'x': x, 'y': y,
             'button': button, 'action': action,
             'scroll_delta': scroll_delta,
-        }
+        })
         for agent_id in agent_ids:
-            if agent_id in self._connected_agents:
-                self._send_to_agent(agent_id, msg_dict)
+            ws = self._agents.get(agent_id)
+            if ws and self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
 
     def broadcast_file(self, agent_ids: List[str], filepath: str):
         for agent_id in agent_ids:
@@ -297,48 +231,32 @@ class AgentServer(QObject):
     # ==================== 내부 구현 ====================
 
     def _send_to_agent(self, agent_id: str, msg_dict: dict):
-        """특정 에이전트에 JSON 메시지 전송 (서버 릴레이 경유)
-
-        target_agent 필드를 추가하여 서버가 올바른 에이전트에 전달.
-        """
-        if not self._ws or not self._loop or not self._loop.is_running():
-            logger.warning(f"[AgentServer] 전송 실패 — WS 미연결 (type={msg_dict.get('type')})")
-            return
-
-        msg_dict['target_agent'] = agent_id
-        msg = json.dumps(msg_dict)
-        logger.debug(f"[AgentServer] 전송: type={msg_dict.get('type')}, target={agent_id}")
-        asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
-
-    def _send_binary_to_agent(self, agent_id: str, data: bytes):
-        """특정 에이전트에 바이너리 전송 (서버 릴레이 경유)
-
-        agent_id(32바이트) 프리픽스를 추가하여 서버가 올바른 에이전트에 전달.
-        """
-        if not self._ws or not self._loop or not self._loop.is_running():
-            return
-
-        prefixed = _pad_agent_id(agent_id) + data
-        asyncio.run_coroutine_threadsafe(self._ws.send(prefixed), self._loop)
+        """특정 에이전트에 JSON 메시지 전송"""
+        ws = self._agents.get(agent_id)
+        if ws and self._loop and self._loop.is_running():
+            msg = json.dumps(msg_dict)
+            asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
 
     async def _send_file_async(self, agent_id: str, filepath: str):
-        """파일 전송 코루틴 (서버 릴레이 경유)"""
-        if not self._ws:
+        """파일 전송 코루틴"""
+        ws = self._agents.get(agent_id)
+        if not ws:
             return
 
         filename = os.path.basename(filepath)
         filesize = os.path.getsize(filepath)
 
-        # file_start 전송
-        self._send_to_agent(agent_id, {
+        await ws.send(json.dumps({
             'type': 'file_start',
             'name': filename,
             'size': filesize,
-        })
+        }))
 
-        # file_ack 대기 — 에이전트의 응답은 서버 릴레이를 통해 _handle_text_message로 수신됨
-        # 여기서는 단순히 대기 후 전송 (실제 ack은 비동기로 처리)
-        await asyncio.sleep(0.5)
+        resp = await ws.recv()
+        ack = json.loads(resp)
+        if ack.get('type') != 'file_ack' or ack.get('status') != 'ready':
+            logger.error(f"파일 전송 거부 [{agent_id}]: {ack}")
+            return
 
         sent = 0
         with open(filepath, 'rb') as f:
@@ -346,23 +264,28 @@ class AgentServer(QObject):
                 chunk = f.read(self.CHUNK_SIZE)
                 if not chunk:
                     break
-                # 바이너리 청크 전송 (agent_id 프리픽스)
-                self._send_binary_to_agent(agent_id, chunk)
+                await ws.send(chunk)
                 sent += len(chunk)
                 self.file_progress.emit(agent_id, sent, filesize)
 
-        # file_end 전송
-        self._send_to_agent(agent_id, {
+        await ws.send(json.dumps({
             'type': 'file_end',
             'name': filename,
-        })
+        }))
+
+        resp = await ws.recv()
+        result = json.loads(resp)
+        if result.get('type') == 'file_complete':
+            remote_path = result.get('path', '')
+            self.file_complete.emit(agent_id, remote_path)
+            logger.info(f"파일 전송 완료 [{agent_id}]: {filename} → {remote_path}")
 
     def _run_loop(self):
-        """asyncio 이벤트 루프 + WS 클라이언트 실행 (별도 스레드)"""
+        """asyncio 이벤트 루프 실행 (스레드)"""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._connect())
+            self._loop.run_until_complete(self._serve())
         except Exception as e:
             if not self._stop_event.is_set():
                 logger.error(f"AgentServer 오류: {e}")
@@ -373,131 +296,100 @@ class AgentServer(QObject):
                 pass
             self._loop = None
 
-    async def _connect(self):
-        """서버 WS에 접속 + 자동 재연결 루프"""
-        reconnect_interval = 5  # 초
-        connect_count = 0
-        replaced_count = 0  # 연속 4002 카운터
+    async def _serve(self):
+        """WebSocket 서버 실행"""
+        try:
+            self._server = await websockets.serve(
+                self._handle_agent,
+                '0.0.0.0',
+                self._port,
+                max_size=50 * 1024 * 1024,
+                ping_interval=30,
+                ping_timeout=10,
+            )
+            logger.info(f"[AgentServer] 리스닝: ws://0.0.0.0:{self._port}")
 
-        while not self._stop_event.is_set():
-            connect_count += 1
-            was_replaced = False
-            try:
-                logger.info(f"[AgentServer] 서버 WS 접속 시도 (#{connect_count})...")
-                async with websockets.connect(
-                    self._server_url,
-                    max_size=50 * 1024 * 1024,
-                    ping_interval=30,
-                    ping_timeout=10,
-                ) as ws:
-                    self._ws = ws
-                    logger.info(f"[AgentServer] 서버 WS 접속 성공 (#{connect_count})")
-                    reconnect_interval = 5  # 성공 시 간격 리셋
-                    replaced_count = 0       # 연속 교체 카운터 리셋
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.5)
+        finally:
+            if self._server:
+                self._server.close()
+                await self._server.wait_closed()
 
-                    msg_count = 0
-                    # 메시지 수신 루프
-                    async for message in ws:
-                        if self._stop_event.is_set():
-                            break
-                        msg_count += 1
-                        if isinstance(message, str):
-                            self._handle_text_message(message)
-                        elif isinstance(message, bytes):
-                            self._handle_binary_message(message)
+    async def _handle_agent(self, websocket):
+        """에이전트 연결 핸들러"""
+        remote = websocket.remote_address
+        remote_ip = remote[0] if remote else 'unknown'
+        agent_id = None
 
-                    logger.info(f"[AgentServer] 메시지 루프 종료 (총 {msg_count}개 수신)")
+        try:
+            # 인증 대기
+            raw = await asyncio.wait_for(websocket.recv(), timeout=10)
+            msg = json.loads(raw)
 
-            except websockets.exceptions.ConnectionClosed as e:
-                if e.code == 4002:
-                    replaced_count += 1
-                    was_replaced = True
-                    logger.warning(
-                        f"[AgentServer] 연결 교체됨 (code=4002, 연속 {replaced_count}회)"
-                    )
-                else:
-                    logger.warning(f"[AgentServer] 서버 WS 연결 종료: code={e.code}, reason={e.reason}")
-            except (ConnectionRefusedError, OSError) as e:
-                logger.warning(f"[AgentServer] 서버 접속 실패: {e}")
-            except Exception as e:
-                if not self._stop_event.is_set():
-                    logger.warning(f"[AgentServer] 서버 접속 오류: {type(e).__name__}: {e}")
-            finally:
-                self._ws = None
-                # 모든 에이전트 연결 해제 처리
-                disconnected = list(self._connected_agents)
-                if disconnected:
-                    logger.info(f"[AgentServer] WS 끊김 — {len(disconnected)}개 에이전트 해제: {disconnected}")
-                for aid in disconnected:
-                    self._connected_agents.discard(aid)
-                    self.agent_disconnected.emit(aid)
+            if msg.get('type') != 'auth':
+                await websocket.close()
+                return
 
-            # 연속 교체(4002) 3회 이상이면 다른 매니저 인스턴스가 활성 → 재접속 중단
-            if replaced_count >= 3:
-                logger.warning(
-                    f"[AgentServer] 연속 {replaced_count}회 교체 — "
-                    "다른 매니저가 활성 상태. 재접속 중단"
-                )
-                break
+            agent_id = msg.get('agent_id', remote_ip)
+            hostname = msg.get('hostname', '')
+            os_info = msg.get('os_info', '')
+            screen_width = msg.get('screen_width', 1920)
+            screen_height = msg.get('screen_height', 1080)
 
-            if not self._stop_event.is_set():
-                # 교체 시 더 긴 대기 (서버가 이전 연결 정리)
-                wait = 10 if was_replaced else reconnect_interval
-                logger.info(f"[AgentServer] 재접속 대기... ({wait}초)")
-                await asyncio.sleep(wait)
-                if not was_replaced:
-                    reconnect_interval = min(reconnect_interval + 5, 30)
+            # 인증 허용
+            await websocket.send(json.dumps({'type': 'auth_ok'}))
 
-    def _handle_text_message(self, raw: str):
-        """서버에서 릴레이된 JSON 텍스트 메시지 처리
+            # 기존 같은 agent_id 연결 교체
+            old_ws = self._agents.get(agent_id)
+            if old_ws:
+                try:
+                    await old_ws.close()
+                except Exception:
+                    pass
 
-        모든 메시지에 source_agent 필드가 포함됨.
-        """
+            self._agents[agent_id] = websocket
+            self._agent_info[agent_id] = {
+                'hostname': hostname,
+                'os_info': os_info,
+                'ip': remote_ip,
+                'screen_width': screen_width,
+                'screen_height': screen_height,
+            }
+
+            self.agent_connected.emit(agent_id, remote_ip)
+            logger.info(f"[AgentServer] 에이전트 연결: {agent_id} ({remote_ip})")
+
+            # 메시지 수신 루프
+            async for message in websocket:
+                if self._stop_event.is_set():
+                    break
+                if isinstance(message, str):
+                    self._handle_text_message(agent_id, message)
+                elif isinstance(message, bytes):
+                    self._handle_binary_message(agent_id, message)
+
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"[AgentServer] 에이전트 연결 종료: {agent_id or remote_ip}")
+        except asyncio.TimeoutError:
+            logger.warning(f"[AgentServer] 인증 타임아웃: {remote_ip}")
+        except Exception as e:
+            logger.warning(f"[AgentServer] 핸들러 오류 [{agent_id or remote_ip}]: {e}")
+        finally:
+            if agent_id and self._agents.get(agent_id) is websocket:
+                del self._agents[agent_id]
+                self._agent_info.pop(agent_id, None)
+                self.agent_disconnected.emit(agent_id)
+                logger.info(f"[AgentServer] 에이전트 해제: {agent_id}")
+
+    def _handle_text_message(self, agent_id: str, raw: str):
+        """JSON 텍스트 메시지 처리"""
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
             return
 
         msg_type = msg.get('type', '')
-        agent_id = msg.get('source_agent', '')
-
-        # 에이전트 연결/해제 알림 (서버가 전달)
-        if msg_type == 'auth':
-            # 에이전트가 서버에 접속 → auth 메시지 릴레이됨
-            agent_id = msg.get('agent_id', '') or agent_id
-            if agent_id:
-                self._agent_info[agent_id] = {
-                    'hostname': msg.get('hostname', agent_id),
-                    'os_info': msg.get('os_info', ''),
-                    'ip': msg.get('ip', ''),
-                    'screen_width': msg.get('screen_width', 1920),
-                    'screen_height': msg.get('screen_height', 1080),
-                }
-                self._connected_agents.add(agent_id)
-                self.agent_connected.emit(agent_id, msg.get('ip', ''))
-                logger.info(f"에이전트 연결 (릴레이): {agent_id}")
-            return
-
-        if msg_type == 'agent_connected':
-            # 서버가 보내는 이미 접속된 에이전트 알림
-            if agent_id:
-                self._connected_agents.add(agent_id)
-                self.agent_connected.emit(agent_id, '')
-                logger.info(f"에이전트 연결 (기존): {agent_id}")
-            return
-
-        if msg_type == 'agent_disconnected':
-            if agent_id:
-                self._connected_agents.discard(agent_id)
-                self._agent_info.pop(agent_id, None)
-                self.agent_disconnected.emit(agent_id)
-                logger.info(f"에이전트 해제 (릴레이): {agent_id}")
-            return
-
-        # 에이전트로부터의 일반 메시지
-        if not agent_id:
-            logger.debug(f"[AgentServer] source_agent 없는 메시지 무시: type={msg_type}")
-            return
 
         if msg_type == 'clipboard':
             fmt = msg.get('format', '')
@@ -511,19 +403,10 @@ class AgentServer(QObject):
         elif msg_type == 'pong':
             pass
 
-        elif msg_type == 'thumbnail_error':
-            error = msg.get('error', 'unknown')
-            logger.error(f"[AgentServer] 썸네일 오류 [{agent_id}]: {error}")
-
         elif msg_type == 'file_progress':
             received = msg.get('received', 0)
             total = msg.get('total', 0)
             self.file_progress.emit(agent_id, received, total)
-
-        elif msg_type == 'file_complete':
-            remote_path = msg.get('path', '')
-            self.file_complete.emit(agent_id, remote_path)
-            logger.info(f"파일 전송 완료 [{agent_id}]: {remote_path}")
 
         elif msg_type == 'execute_result':
             command = msg.get('command', '')
@@ -533,24 +416,13 @@ class AgentServer(QObject):
             output = stdout if stdout else stderr
             self.command_result.emit(agent_id, command, output, returncode)
 
-        elif msg_type == 'file_ack':
-            # 파일 수신 준비 완료 — 로그만
-            status = msg.get('status', '')
-            logger.debug(f"파일 ack [{agent_id}]: {status}")
-
-    def _handle_binary_message(self, data: bytes):
-        """서버에서 릴레이된 바이너리 프레임 처리
-
-        포맷: agent_id(32바이트) + 원본 바이너리(header + payload)
-        """
-        if len(data) < AGENT_ID_LEN + 2:
+    def _handle_binary_message(self, agent_id: str, data: bytes):
+        """바이너리 프레임 처리 (화면 데이터)"""
+        if len(data) < 2:
             return
 
-        agent_id = _unpad_agent_id(data[:AGENT_ID_LEN])
-        original = data[AGENT_ID_LEN:]
-
-        header = original[0]
-        payload = original[1:]
+        header = data[0]
+        payload = data[1:]
 
         if header == self.HEADER_THUMBNAIL:
             self.thumbnail_received.emit(agent_id, payload)

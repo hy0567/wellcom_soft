@@ -2,22 +2,16 @@
 
 기능:
 - 서버 로그인 + 자기 등록 + 하트비트
-- 서버(log.wellcomll.org:4797/ws/agent)에 WebSocket 클라이언트로 접속
-- 서버가 같은 계정의 매니저와 메시지를 릴레이
+- WebSocket 클라이언트 (관리PC에 역방향 연결)
 - 화면 캡처 및 스트리밍 (mss + MJPEG)
 - 키보드/마우스 입력 주입 (pynput)
 - 양방향 클립보드 동기화
 - 파일 수신
 
-아키텍처:
-  매니저 = WS 클라이언트 (서버/ws/manager?token=JWT 접속)
-  에이전트(이 코드) = WS 클라이언트 (서버/ws/agent?token=JWT 접속)
-  서버 = REST API + WS 릴레이 (포트포워딩 불필요)
-
 사용법:
-  python agent_main.py
-  python agent_main.py --api-url http://log.wellcomll.org:4797
-  python agent_main.py --install
+  python agent_main.py --server 192.168.1.100
+  python agent_main.py --api-url http://log.wellcomll.org:8000
+  python agent_main.py --install --server 192.168.1.100
   python agent_main.py --uninstall
 """
 
@@ -53,45 +47,11 @@ from input_handler import InputHandler
 from clipboard_monitor import ClipboardMonitor
 from file_receiver import FileReceiver
 
-def _setup_logging():
-    """로깅 설정 — 콘솔 + 파일 동시 출력"""
-    log_fmt = '%(asctime)s [%(name)s] %(levelname)s: %(message)s'
-    handlers = []
-
-    # 콘솔 핸들러 (console=True 빌드 또는 개발 환경)
-    try:
-        handlers.append(logging.StreamHandler())
-    except Exception:
-        pass
-
-    # 파일 핸들러 (설치 디렉터리 또는 현재 디렉터리)
-    try:
-        import os as _os
-        base = _os.environ.get('WELLCOMAGENT_BASE_DIR', '')
-        if not base or not _os.path.isdir(base):
-            if getattr(sys, 'frozen', False):
-                base = _os.path.dirname(sys.executable)
-            else:
-                base = _os.path.dirname(_os.path.abspath(__file__))
-        log_dir = _os.path.join(base, 'logs')
-        _os.makedirs(log_dir, exist_ok=True)
-        log_path = _os.path.join(log_dir, 'agent.log')
-        # 로그 파일 크기 제한 (500KB)
-        if _os.path.exists(log_path) and _os.path.getsize(log_path) > 500_000:
-            bak = log_path + '.bak'
-            if _os.path.exists(bak):
-                _os.remove(bak)
-            _os.rename(log_path, bak)
-        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
-    except Exception:
-        pass
-
-    if not handlers:
-        handlers.append(logging.NullHandler())
-
-    logging.basicConfig(level=logging.INFO, format=log_fmt, handlers=handlers)
-
-_setup_logging()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger('WellcomAgent')
 
 STARTUP_REG_KEY = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
@@ -204,11 +164,6 @@ class AgentAPIClient:
         except Exception:
             pass
 
-    @property
-    def token(self) -> str:
-        """JWT 토큰 반환 (WS 접속 시 사용)"""
-        return self._token or ''
-
 
 def _get_local_ip() -> str:
     """로컬 IP 주소 조회"""
@@ -233,12 +188,7 @@ def _get_mac_address() -> str:
 
 
 class WellcomAgent:
-    """서버 등록 + 서버 WS 릴레이 접속 + 화면 캡처 + 입력 주입
-
-    에이전트는 서버(REST API)에 로그인 후,
-    서버(WS 릴레이)에 직접 접속하여 매니저와 통신한다.
-    서버가 같은 계정의 매니저에 메시지를 중계. 포트포워딩 불필요.
-    """
+    """트레이 아이콘 + 서버 등록 + WebSocket + 화면 캡처 + 입력 주입"""
 
     def __init__(self):
         self.config = AgentConfig()
@@ -247,13 +197,14 @@ class WellcomAgent:
         self.clipboard = ClipboardMonitor()
         self.file_receiver = FileReceiver(self.config.save_dir)
         self.api_client: Optional[AgentAPIClient] = None
-        self._ws: Optional[object] = None           # 서버 WS 릴레이 연결
+        self._ws = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tray_thread = None
         self._heartbeat_thread = None
         self._running = True
         self._streaming = False
         self._stream_task = None
+        self._thumbnail_push = False
         self._thumbnail_push_task = None
         self._agent_id = socket.gethostname()
         self._local_ip = _get_local_ip()
@@ -269,12 +220,9 @@ class WellcomAgent:
             'mac_address': self._mac_address,
         }
 
-    # 서버 API URL (고정)
-    DEFAULT_API_URL = "http://log.wellcomll.org:4797"
-
     @staticmethod
-    def _ask_credentials() -> tuple:
-        """GUI 입력창으로 사용자 이름/비밀번호만 입력받기"""
+    def _ask_server_ip() -> str:
+        """GUI 입력창으로 관리PC IP 입력받기"""
         try:
             import tkinter as tk
             from tkinter import simpledialog
@@ -283,6 +231,41 @@ class WellcomAgent:
             root.withdraw()
             root.attributes('-topmost', True)
 
+            ip = simpledialog.askstring(
+                "WellcomAgent 초기 설정",
+                "관리PC IP 주소를 입력하세요:\n"
+                "(예: 192.168.1.100)",
+                parent=root,
+            )
+            root.destroy()
+            if ip:
+                ip = ip.strip()
+            return ip or ''
+        except Exception as e:
+            logger.error(f"IP 입력창 오류: {e}")
+            return ''
+
+    @staticmethod
+    def _ask_login_info() -> tuple:
+        """GUI 입력창으로 서버 로그인 정보 입력받기"""
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+
+            api_url = simpledialog.askstring(
+                "WellcomAgent 서버 설정",
+                "서버 API 주소를 입력하세요:\n"
+                "(예: http://log.wellcomll.org:8000)",
+                parent=root,
+            )
+            if not api_url:
+                root.destroy()
+                return '', '', ''
+
             username = simpledialog.askstring(
                 "WellcomAgent 로그인",
                 "사용자 이름:",
@@ -290,7 +273,7 @@ class WellcomAgent:
             )
             if not username:
                 root.destroy()
-                return '', ''
+                return api_url.strip(), '', ''
 
             password = simpledialog.askstring(
                 "WellcomAgent 로그인",
@@ -299,15 +282,15 @@ class WellcomAgent:
                 show='*',
             )
             root.destroy()
-            return username.strip(), password or ''
+            return api_url.strip(), username.strip(), password or ''
         except Exception as e:
             logger.error(f"로그인 입력창 오류: {e}")
-            return '', ''
+            return '', '', ''
 
     def _server_login(self) -> bool:
-        """서버에 로그인 (토큰 저장 → 재시작 시 자동 로그인)"""
-        # 항상 기본 서버 URL 강제 적용 (IP 직접 입력 등 이전 설정 무시)
-        self.config.set('api_url', self.DEFAULT_API_URL)
+        """서버에 로그인하고 에이전트 등록"""
+        if not self.config.api_url:
+            return False
 
         self.api_client = AgentAPIClient(self.config)
 
@@ -316,15 +299,15 @@ class WellcomAgent:
             logger.info("저장된 토큰으로 인증 성공")
             return True
 
-        # 토큰 없거나 만료 → 사용자 이름/비밀번호 입력
-        username, password = self._ask_credentials()
+        # 토큰 없거나 만료 → 로그인 필요
+        _, username, password = self._ask_login_info()
         if not username or not password:
             return False
 
         return self.api_client.login(username, password)
 
     def _register_self(self):
-        """서버에 에이전트 자신을 등록 (IP, hostname, OS 정보)"""
+        """서버에 에이전트 자신을 등록"""
         if not self.api_client:
             return
 
@@ -341,14 +324,8 @@ class WellcomAgent:
             screen_height=screen_h,
         )
 
-    def _get_ws_url(self) -> str:
-        """서버 WS URL 생성 (ws://서버/ws/agent?token=JWT)"""
-        api_url = self.config.api_url
-        ws_url = api_url.replace('https://', 'wss://').replace('http://', 'ws://')
-        return f"{ws_url}/ws/agent?token={self.api_client.token}"
-
     def _heartbeat_loop(self):
-        """하트비트 스레드 — 서버에 주기적으로 IP/상태 전송"""
+        """하트비트 스레드"""
         interval = self.config.heartbeat_interval
         screen_w, screen_h = self.screen_capture.screen_size
 
@@ -357,90 +334,67 @@ class WellcomAgent:
             if not self._running:
                 break
             if self.api_client:
-                # IP가 바뀔 수 있으므로 갱신
-                self._local_ip = _get_local_ip()
                 self.api_client.send_heartbeat(
                     self._agent_id, self._local_ip,
                     screen_w, screen_h,
                 )
 
-    @staticmethod
-    def _show_toast(title: str, message: str):
-        """간단한 토스트 알림 (tkinter messagebox)"""
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-            messagebox.showinfo(title, message, parent=root)
-            root.destroy()
-        except Exception:
-            pass
-
     def start(self):
-        """에이전트 시작: 서버 로그인 → 등록 → 서버 WS 릴레이 접속"""
-        # 1) 서버 로그인
-        if not self._server_login():
-            logger.error("서버 로그인 실패 — 종료합니다. 재실행 후 다시 시도하세요.")
-            self._show_toast("WellcomAgent", "서버 로그인 실패.\n재실행 후 다시 시도하세요.")
-            return
+        """에이전트 시작"""
+        # 서버 로그인 (API URL이 설정된 경우)
+        if self.config.api_url:
+            if not self._server_login():
+                logger.warning("서버 로그인 실패 — WebSocket 직접 연결 모드로 전환")
+            else:
+                self._register_self()
 
-        # 2) 서버에 자기 등록
-        self._register_self()
+                # 하트비트 시작
+                self._heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_loop, daemon=True, name='Heartbeat'
+                )
+                self._heartbeat_thread.start()
 
-        # 3) 하트비트 시작
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name='Heartbeat'
-        )
-        self._heartbeat_thread.start()
+        # 매니저 WebSocket 연결을 위한 IP 확인
+        if not self.config.server_ip:
+            ip = self._ask_server_ip()
+            if not ip:
+                return
+            self.config.set('server_ip', ip)
 
         logger.info("WellcomSOFT Agent 시작")
-        logger.info(f"에이전트 ID: {self._agent_id}")
-        logger.info(f"로컬 IP: {self._local_ip}")
-        logger.info(f"서버: {self.config.api_url}")
+        logger.info(f"관리PC: {self.config.server_ip}:{self.config.server_port}")
 
-        # 4) 클립보드 감시
+        # 클립보드 감시
         if self.config.clipboard_sync:
             self.clipboard.start_monitoring(self._on_clipboard_changed)
 
-        # 5) 트레이 아이콘 (메인 스레드에서 실행, WS는 백그라운드)
-        #    pystray.Icon.run()은 메인 스레드에서 실행해야 안정적
-        self._ws_thread = threading.Thread(
-            target=self._run_ws_loop, daemon=True, name='WSRelay'
+        # 트레이 아이콘
+        self._tray_thread = threading.Thread(
+            target=self._run_tray, daemon=True, name='TrayIcon'
         )
-        self._ws_thread.start()
+        self._tray_thread.start()
 
-        # 트레이 아이콘을 메인 스레드에서 실행
-        self._run_tray()
-
-    def _run_ws_loop(self):
-        """WS 릴레이 접속 루프 (백그라운드 스레드)"""
+        # WebSocket 클라이언트
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._run_client())
-        except Exception as e:
-            logger.warning(f"WS 루프 종료: {e}")
+        except KeyboardInterrupt:
+            logger.info("Ctrl+C — 종료")
         finally:
+            # 오프라인 보고
             if self.api_client:
                 self.api_client.report_offline(self._agent_id)
             self.clipboard.stop_monitoring()
             self.screen_capture.close()
 
     async def _run_client(self):
-        """서버 WS 릴레이에 접속 + 자동 재연결 루프
-
-        서버(/ws/agent?token=JWT)에 접속하여 auth 핸드셰이크 후
-        메시지 수신 루프를 실행. 서버가 매니저와의 메시지를 중계.
-        """
-        reconnect_interval = 5  # 초
+        """관리PC WebSocket 서버에 연결 (자동 재연결)"""
+        uri = f"ws://{self.config.server_ip}:{self.config.server_port}"
 
         while self._running:
-            uri = self._get_ws_url()
-
             try:
-                logger.info(f"서버 WS 릴레이 접속 시도...")
+                logger.info(f"관리PC에 연결 시도: {uri}")
                 async with websockets.connect(
                     uri,
                     max_size=50 * 1024 * 1024,
@@ -449,7 +403,7 @@ class WellcomAgent:
                 ) as ws:
                     self._ws = ws
 
-                    # 인증 핸드셰이크 (에이전트 → 서버 → 매니저)
+                    # 인증
                     sys_info = self._get_system_info()
                     screen_w, screen_h = self.screen_capture.screen_size
                     await ws.send(json.dumps({
@@ -464,12 +418,11 @@ class WellcomAgent:
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     msg = json.loads(raw)
                     if msg.get('type') != 'auth_ok':
-                        logger.error(f"서버 인증 실패: {msg}")
-                        self._ws = None
-                        await asyncio.sleep(reconnect_interval)
+                        logger.error(f"인증 실패: {msg}")
+                        await asyncio.sleep(5)
                         continue
 
-                    logger.info(f"서버 WS 릴레이 접속 성공")
+                    logger.info("관리PC 연결 성공!")
 
                     # 메시지 수신 루프
                     async for message in ws:
@@ -481,26 +434,18 @@ class WellcomAgent:
                             await self._handle_binary(ws, message)
 
             except websockets.exceptions.ConnectionClosed:
-                logger.info("서버 WS 연결 종료")
-            except asyncio.TimeoutError:
-                logger.warning("서버 인증 타임아웃")
-            except (ConnectionRefusedError, OSError) as e:
-                logger.warning(f"서버 접속 실패: {e}")
+                logger.info("관리PC 연결 종료")
             except Exception as e:
-                logger.warning(f"서버 접속 오류: {e}")
+                err_msg = str(e) or type(e).__name__
+                logger.warning(f"연결 오류: {err_msg}")
             finally:
                 self._ws = None
-                # 스트리밍 정리
-                if self._stream_task:
-                    self._stream_task.cancel()
-                    self._stream_task = None
-                if self._thumbnail_push_task:
-                    self._thumbnail_push_task.cancel()
-                    self._thumbnail_push_task = None
+                self._streaming = False
+                self._thumbnail_push = False
 
             if self._running:
-                logger.info(f"서버 재접속 대기... ({reconnect_interval}초)")
-                await asyncio.sleep(reconnect_interval)
+                logger.info("5초 후 재연결...")
+                await asyncio.sleep(5)
 
     async def _handle_text(self, websocket, raw: str):
         """JSON 텍스트 메시지 처리"""
@@ -510,8 +455,6 @@ class WellcomAgent:
             return
 
         msg_type = msg.get('type', '')
-        if msg_type not in ('ping', 'request_thumbnail', 'start_thumbnail_push'):
-            logger.info(f"명령 수신: type={msg_type}")
 
         if msg_type == 'ping':
             await websocket.send(json.dumps({'type': 'pong'}))
@@ -519,36 +462,20 @@ class WellcomAgent:
         elif msg_type == 'request_thumbnail':
             await self._send_thumbnail(websocket)
 
-        elif msg_type == 'start_thumbnail_push':
-            # 에이전트가 자동으로 주기적 썸네일 전송
-            interval = msg.get('interval', 1.0)
-            if self._thumbnail_push_task:
-                self._thumbnail_push_task.cancel()
-            self._thumbnail_push_task = asyncio.ensure_future(
-                self._thumbnail_push_loop(websocket, interval)
-            )
-            logger.info(f"썸네일 자동 전송 시작: {interval}초 간격")
-
-        elif msg_type == 'stop_thumbnail_push':
-            if self._thumbnail_push_task:
-                self._thumbnail_push_task.cancel()
-                self._thumbnail_push_task = None
-                logger.info("썸네일 자동 전송 중지")
-
         elif msg_type == 'start_stream':
             fps = msg.get('fps', self.config.screen_fps)
             quality = msg.get('quality', self.config.screen_quality)
-            # 기존 스트리밍 정리
-            if self._stream_task:
-                self._stream_task.cancel()
-            self._stream_task = asyncio.ensure_future(
-                self._stream_loop(websocket, fps, quality)
-            )
+            await self._start_streaming(websocket, fps, quality)
 
         elif msg_type == 'stop_stream':
-            if self._stream_task:
-                self._stream_task.cancel()
-                self._stream_task = None
+            self._streaming = False
+
+        elif msg_type == 'start_thumbnail_push':
+            interval = msg.get('interval', 1.0)
+            await self._start_thumbnail_push(websocket, interval)
+
+        elif msg_type == 'stop_thumbnail_push':
+            self._thumbnail_push = False
 
         elif msg_type == 'key_event':
             self.input_handler.handle_key_event(
@@ -622,65 +549,50 @@ class WellcomAgent:
                 max_width=self.config.thumbnail_width,
                 quality=self.config.thumbnail_quality,
             )
-            if not jpeg_data:
-                logger.error("썸네일 캡처 결과 비어 있음 (0 bytes)")
-                await websocket.send(json.dumps({
-                    'type': 'thumbnail_error',
-                    'error': 'capture returned empty data',
-                }))
-                return
             await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
-            logger.debug(f"썸네일 전송: {len(jpeg_data)}B")
         except Exception as e:
-            error_msg = f"{type(e).__name__}: {e}"
-            logger.error(f"썸네일 전송 실패: {error_msg}", exc_info=True)
-            # 에러 정보를 텍스트로 전송 (서버 릴레이 → 매니저에서 확인 가능)
-            try:
-                await websocket.send(json.dumps({
-                    'type': 'thumbnail_error',
-                    'error': error_msg,
-                }))
-            except Exception:
-                pass
+            logger.debug(f"썸네일 전송 실패: {e}")
 
-    async def _thumbnail_push_loop(self, websocket, interval: float):
-        """주기적 썸네일 자동 전송 루프"""
+    async def _start_thumbnail_push(self, websocket, interval: float = 1.0):
+        """썸네일 push 모드 — 주기적으로 썸네일을 자동 전송"""
+        self._thumbnail_push = True
+        interval = max(0.2, min(interval, 5.0))
+        logger.info(f"썸네일 push 시작: {interval}초 간격")
+
         try:
-            while self._running:
+            while self._thumbnail_push and self._running:
                 try:
                     jpeg_data = self.screen_capture.capture_thumbnail(
                         max_width=self.config.thumbnail_width,
                         quality=self.config.thumbnail_quality,
                     )
-                    if jpeg_data:
-                        await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
+                    await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
+                except websockets.exceptions.ConnectionClosed:
+                    break
                 except Exception as e:
-                    logger.debug(f"썸네일 push 실패: {e}")
+                    logger.debug(f"push 썸네일 전송 실패: {e}")
                 await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            pass
-        except websockets.exceptions.ConnectionClosed:
-            pass
         finally:
-            logger.info("썸네일 push 루프 종료")
+            self._thumbnail_push = False
+            logger.info("썸네일 push 중지")
 
-    async def _stream_loop(self, websocket, fps: int, quality: int):
-        """화면 스트리밍 루프"""
+    async def _start_streaming(self, websocket, fps: int, quality: int):
+        """화면 스트리밍 시작"""
+        self._streaming = True
         interval = 1.0 / max(1, fps)
         logger.info(f"스트리밍 시작: {fps}fps, quality={quality}")
 
         try:
-            while self._running:
+            while self._streaming and self._running:
                 jpeg_data = self.screen_capture.capture_jpeg(quality=quality)
                 await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
                 await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            pass
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception as e:
             logger.debug(f"스트리밍 오류: {e}")
         finally:
+            self._streaming = False
             logger.info("스트리밍 중지")
 
     async def _execute_command(self, websocket, command: str):
@@ -726,7 +638,7 @@ class WellcomAgent:
             self.clipboard.set_clipboard_image(png_data)
 
     def _on_clipboard_changed(self, fmt: str, data):
-        """로컬 클립보드 변경 → 매니저에 전송"""
+        """로컬 클립보드 변경 → 관리PC에 전송"""
         if not self._ws:
             return
 
@@ -745,11 +657,11 @@ class WellcomAgent:
         else:
             return
 
-        if self._loop and self._loop.is_running():
+        if self._loop and self._loop.is_running() and self._ws:
             asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
 
     def _run_tray(self):
-        """시스템 트레이 아이콘 (메인 스레드에서 실행)"""
+        """시스템 트레이 아이콘"""
         try:
             import pystray
             from PIL import Image, ImageDraw
@@ -757,7 +669,7 @@ class WellcomAgent:
             img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse([8, 8, 56, 56], fill=(33, 150, 243, 255))
-            draw.text((20, 18), 'A', fill=(255, 255, 255, 255))
+            draw.text((20, 18), 'S', fill=(255, 255, 255, 255))
 
             def on_quit(icon, item):
                 self._running = False
@@ -767,41 +679,27 @@ class WellcomAgent:
                 os._exit(0)
 
             def on_show_info(icon, item):
-                connected = "연결됨" if self._ws else "대기 중"
-                info_msg = (
-                    f"에이전트 ID: {self._agent_id}\n"
-                    f"서버: {self.config.api_url}\n"
-                    f"WS 릴레이: {connected}\n"
-                    f"IP: {self._local_ip}"
-                )
-                self._show_toast("WellcomAgent 정보", info_msg)
+                status = "연결됨" if self._ws else "연결 대기"
+                streaming = " [스트리밍]" if self._streaming else ""
+                server_info = f"서버: {self.config.server_ip}:{self.config.server_port}"
+                api_info = f" | API: {self.config.api_url}" if self.config.api_url else ""
+                logger.info(f"{server_info}{api_info}, 상태: {status}{streaming}")
 
             menu = pystray.Menu(
                 pystray.MenuItem(
-                    f'WellcomAgent ({self._agent_id})',
+                    f'WellcomSOFT → {self.config.server_ip}',
                     on_show_info,
                     default=True,
                 ),
                 pystray.MenuItem('종료', on_quit),
             )
 
-            self._tray_icon = pystray.Icon('WellcomAgent', img, 'WellcomSOFT Agent', menu)
-            logger.info("트레이 아이콘 시작")
-            self._tray_icon.run()
+            icon = pystray.Icon('WellcomAgent', img, 'WellcomSOFT Agent', menu)
+            icon.run()
         except ImportError:
             logger.warning("pystray 미설치 — 트레이 아이콘 없이 실행")
-            self._wait_forever()
         except Exception as e:
             logger.warning(f"트레이 아이콘 실패: {e}")
-            self._wait_forever()
-
-    def _wait_forever(self):
-        """트레이 아이콘 없이 대기 (WS 스레드가 돌고 있으므로 메인 스레드 유지)"""
-        try:
-            while self._running:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            self._running = False
 
 
 def install_startup():
@@ -836,134 +734,15 @@ def uninstall_startup():
         print(f"시작프로그램 해제 실패: {e}")
 
 
-def _get_agent_base_dir() -> str:
-    """에이전트 설치 기본 경로 감지"""
-    env_base = os.environ.get('WELLCOMAGENT_BASE_DIR')
-    if env_base and os.path.isdir(env_base):
-        return env_base
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def _restart_agent():
-    """에이전트 프로세스 재시작"""
-    # 1) 런처가 설정한 EXE 경로
-    exe_path = os.environ.get('WELLCOMAGENT_EXE_PATH')
-    if exe_path and os.path.exists(exe_path):
-        logger.info(f"[Restart] EXE 경로: {exe_path}")
-        subprocess.Popen([exe_path])
-        os._exit(0)
-
-    # 2) 설치 디렉터리 기준 EXE
-    base_dir = os.environ.get('WELLCOMAGENT_BASE_DIR')
-    if base_dir:
-        candidate = os.path.join(base_dir, 'WellcomAgent.exe')
-        if os.path.exists(candidate):
-            logger.info(f"[Restart] BASE_DIR 기준: {candidate}")
-            subprocess.Popen([candidate])
-            os._exit(0)
-
-    # 3) Fallback
-    if getattr(sys, 'frozen', False):
-        subprocess.Popen([sys.executable])
-    else:
-        subprocess.Popen([sys.executable] + sys.argv)
-    os._exit(0)
-
-
-def check_agent_update() -> bool:
-    """에이전트 업데이트 확인 (tkinter UI).
-
-    Returns:
-        True = 정상 진행, False = 재시작 필요
-    """
-    try:
-        from pathlib import Path
-
-        # 버전 정보 로드
-        try:
-            from version import __version__, __github_repo__, __asset_name__
-        except ImportError:
-            logger.debug("agent/version.py 없음 — 업데이트 확인 스킵")
-            return True
-
-        base_dir = Path(_get_agent_base_dir())
-        # app/ 디렉터리가 없으면 런처 없이 직접 실행 중 → 스킵
-        if not (base_dir / "app").exists() and not os.environ.get('WELLCOMAGENT_BASE_DIR'):
-            logger.debug("런처 없이 실행 중 — 업데이트 확인 스킵")
-            return True
-
-        # updater 모듈 로드
-        try:
-            # app/ 경로에서 실행 중이면 updater가 같은 레벨에 없을 수 있음
-            # sys.path에 부모 디렉터리 추가
-            parent_dir = str(base_dir / "app")
-            if parent_dir not in sys.path:
-                sys.path.insert(0, parent_dir)
-
-            from updater.update_checker import UpdateChecker
-        except ImportError:
-            logger.debug("updater 모듈 없음 — 업데이트 확인 스킵")
-            return True
-
-        checker = UpdateChecker(
-            base_dir=base_dir,
-            repo=__github_repo__,
-            token=None,
-            running_version=__version__,
-            asset_name=__asset_name__,
-        )
-
-        has_update, release_info = checker.check_update()
-        if not has_update or not release_info:
-            return True
-
-        # tkinter 알림 (에이전트는 PyQt6 없음)
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-
-            answer = messagebox.askyesno(
-                "WellcomAgent 업데이트",
-                f"새 버전이 있습니다.\n\n"
-                f"현재: v{__version__}\n"
-                f"최신: v{release_info.version}\n\n"
-                f"업데이트하시겠습니까?",
-                parent=root,
-            )
-            root.destroy()
-
-            if not answer:
-                return True
-
-        except Exception:
-            # tkinter 없으면 자동 업데이트
-            logger.info("tkinter 없음 — 자동 업데이트 진행")
-
-        # 업데이트 적용
-        logger.info(f"에이전트 업데이트 시작: v{__version__} → v{release_info.version}")
-        success = checker.apply_update(release_info)
-
-        if success:
-            logger.info("업데이트 완료 — 재시작합니다")
-            _restart_agent()
-            return False
-
-        logger.error("업데이트 적용 실패")
-        return True
-
-    except Exception as e:
-        logger.debug(f"업데이트 확인 실패: {e}")
-        return True
-
-
 def main():
     config = AgentConfig()
+
+    if '--server' in sys.argv:
+        idx = sys.argv.index('--server')
+        if idx + 1 < len(sys.argv):
+            server_ip = sys.argv[idx + 1]
+            config.set('server_ip', server_ip)
+            print(f"관리PC IP 설정: {server_ip}")
 
     if '--api-url' in sys.argv:
         idx = sys.argv.index('--api-url')
@@ -977,12 +756,6 @@ def main():
     elif '--uninstall' in sys.argv:
         uninstall_startup()
         return
-
-    # 자동 업데이트는 런처(agent_launcher.py)에서 app/ 로드 전에 실행됨.
-    # 개발 환경(런처 없이 직접 실행)에서만 여기서 체크.
-    if not os.environ.get('WELLCOMAGENT_BASE_DIR'):
-        if not check_agent_update():
-            return
 
     agent = WellcomAgent()
     agent.start()

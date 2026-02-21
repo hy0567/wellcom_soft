@@ -82,24 +82,44 @@ class Settings:
             'maximized': False
         },
         'agent_server': {
-            'port': 4797,
+            'port': 9877,
             'max_connections': 200,
         },
         'screen': {
-            'thumbnail_interval': 1000,   # ms - 썸네일 push 간격 (에이전트 자동 전송)
+            'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
             'stream_fps': 15,             # 전체 화면 스트리밍 FPS
             'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
-            'thumbnail_quality': 40,      # 썸네일 JPEG 품질 (30→40 부드러움)
+            'thumbnail_quality': 40,      # 썸네일 JPEG 품질
             'thumbnail_width': 320,       # 썸네일 최대 너비
         },
         'grid_view': {
-            'columns': 0,  # 0 = 자동
+            'columns': 5,                 # 기본 5컬럼 (LinkIO 기준)
+            'scale_factor': 100,          # 축척 (%)
+            'show_title': True,           # 타이틀 표시
+            'frame_speed': 5,             # 그리드 FPS
         },
-        'broadcast': {
-            'input_delay': 0.01,  # 광역 키스트로크 간격 (초)
+        'multi_control': {
+            'random_pos_x': 3,            # 랜덤 좌표 오프셋 X (px)
+            'random_pos_y': 3,            # 랜덤 좌표 오프셋 Y (px)
+            'random_delay_min': 300,      # 랜덤 딜레이 최소 (ms)
+            'random_delay_max': 2000,     # 랜덤 딜레이 최대 (ms)
+            'input_delay': 0.01,          # 기본 입력 간격 (초)
+        },
+        'desktop_widget': {
+            'fullscreen': False,
+            'sound_mute': True,
+            'side_menu': True,
+            'title_bar': True,
+        },
+        'shortcuts': {
+            # 단축키 슬롯 Key_1 ~ Key_20
+            'key_1': '', 'key_2': '', 'key_3': '', 'key_4': '', 'key_5': '',
+            'key_6': '', 'key_7': '', 'key_8': '', 'key_9': '', 'key_10': '',
+            'key_11': '', 'key_12': '', 'key_13': '', 'key_14': '', 'key_15': '',
+            'key_16': '', 'key_17': '', 'key_18': '', 'key_19': '', 'key_20': '',
         },
         'general': {
-            'theme': 'fusion',
+            'theme': 'dark',              # dark / light
             'language': 'ko',
             'start_minimized': False,
             'confirm_delete': True
@@ -110,7 +130,7 @@ class Settings:
             'skip_version': ''
         },
         'server': {
-            'api_url': 'http://log.wellcomll.org:4797',
+            'api_url': 'http://log.wellcomll.org:8000',
             'token': '',
             'username': '',
             'auto_login': False
