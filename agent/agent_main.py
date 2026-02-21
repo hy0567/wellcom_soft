@@ -604,12 +604,25 @@ class WellcomAgent:
             )
             if not jpeg_data:
                 logger.error("썸네일 캡처 결과 비어 있음 (0 bytes)")
+                await websocket.send(json.dumps({
+                    'type': 'thumbnail_error',
+                    'error': 'capture returned empty data',
+                }))
                 return
             logger.info(f"썸네일 캡처 완료: {len(jpeg_data)}B, 전송 중...")
             await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
             logger.info(f"썸네일 전송 완료: {len(jpeg_data)}B")
         except Exception as e:
-            logger.error(f"썸네일 전송 실패: {type(e).__name__}: {e}", exc_info=True)
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.error(f"썸네일 전송 실패: {error_msg}", exc_info=True)
+            # 에러 정보를 텍스트로 전송 (서버 릴레이 → 매니저에서 확인 가능)
+            try:
+                await websocket.send(json.dumps({
+                    'type': 'thumbnail_error',
+                    'error': error_msg,
+                }))
+            except Exception:
+                pass
 
     async def _stream_loop(self, websocket, fps: int, quality: int):
         """화면 스트리밍 루프"""

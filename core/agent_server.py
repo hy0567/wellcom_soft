@@ -503,6 +503,10 @@ class AgentServer(QObject):
         elif msg_type == 'pong':
             pass
 
+        elif msg_type == 'thumbnail_error':
+            error = msg.get('error', 'unknown')
+            logger.error(f"[AgentServer] 썸네일 오류 [{agent_id}]: {error}")
+
         elif msg_type == 'file_progress':
             received = msg.get('received', 0)
             total = msg.get('total', 0)

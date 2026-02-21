@@ -748,6 +748,7 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
 
         # 에이전트에 auth_ok 응답
         await ws.send_text(json.dumps({"type": "auth_ok"}))
+        logger.info(f"[WS Relay] auth_ok 전송 완료: {agent_id}")
 
         # 매니저에 auth 메시지 전달 (agent_connected 트리거)
         mgr_ws = _ws_managers.get(owner_id)
