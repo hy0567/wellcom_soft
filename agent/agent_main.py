@@ -267,6 +267,11 @@ class WellcomAgent:
                 root.destroy()
                 return '', '', ''
 
+            # http:// 자동 보정
+            api_url = api_url.strip()
+            if api_url and not api_url.startswith(('http://', 'https://')):
+                api_url = 'http://' + api_url
+
             username = simpledialog.askstring(
                 "WellcomAgent 로그인",
                 "사용자 이름:",
@@ -291,6 +296,11 @@ class WellcomAgent:
     def _server_login(self) -> bool:
         """서버에 로그인 (토큰 저장 → 재시작 시 자동 로그인)"""
         api_url = self.config.api_url
+
+        # http:// 자동 보정 (config에서 읽은 값)
+        if api_url and not api_url.startswith(('http://', 'https://')):
+            api_url = 'http://' + api_url
+            self.config.set('api_url', api_url)
 
         # API URL이 없으면 입력 받기
         if not api_url:
