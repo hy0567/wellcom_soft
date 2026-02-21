@@ -335,11 +335,26 @@ class WellcomAgent:
                     screen_w, screen_h,
                 )
 
+    @staticmethod
+    def _show_toast(title: str, message: str):
+        """간단한 토스트 알림 (tkinter messagebox)"""
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            messagebox.showinfo(title, message, parent=root)
+            root.destroy()
+        except Exception:
+            pass
+
     def start(self):
         """에이전트 시작: 서버 로그인 → 등록 → 서버 WS 릴레이 접속"""
         # 1) 서버 로그인
         if not self._server_login():
             logger.error("서버 로그인 실패 — 종료합니다. 재실행 후 다시 시도하세요.")
+            self._show_toast("WellcomAgent", "서버 로그인 실패.\n재실행 후 다시 시도하세요.")
             return
 
         # 2) 서버에 자기 등록
@@ -360,21 +375,25 @@ class WellcomAgent:
         if self.config.clipboard_sync:
             self.clipboard.start_monitoring(self._on_clipboard_changed)
 
-        # 5) 트레이 아이콘
-        self._tray_thread = threading.Thread(
-            target=self._run_tray, daemon=True, name='TrayIcon'
+        # 5) 트레이 아이콘 (메인 스레드에서 실행, WS는 백그라운드)
+        #    pystray.Icon.run()은 메인 스레드에서 실행해야 안정적
+        self._ws_thread = threading.Thread(
+            target=self._run_ws_loop, daemon=True, name='WSRelay'
         )
-        self._tray_thread.start()
+        self._ws_thread.start()
 
-        # 6) 서버 WS 릴레이에 접속 (자동 재연결 포함)
+        # 트레이 아이콘을 메인 스레드에서 실행
+        self._run_tray()
+
+    def _run_ws_loop(self):
+        """WS 릴레이 접속 루프 (백그라운드 스레드)"""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._run_client())
-        except KeyboardInterrupt:
-            logger.info("Ctrl+C — 종료")
+        except Exception as e:
+            logger.warning(f"WS 루프 종료: {e}")
         finally:
-            # 오프라인 보고
             if self.api_client:
                 self.api_client.report_offline(self._agent_id)
             self.clipboard.stop_monitoring()
@@ -642,7 +661,7 @@ class WellcomAgent:
             asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
 
     def _run_tray(self):
-        """시스템 트레이 아이콘"""
+        """시스템 트레이 아이콘 (메인 스레드에서 실행)"""
         try:
             import pystray
             from PIL import Image, ImageDraw
@@ -650,7 +669,7 @@ class WellcomAgent:
             img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse([8, 8, 56, 56], fill=(33, 150, 243, 255))
-            draw.text((20, 18), 'S', fill=(255, 255, 255, 255))
+            draw.text((20, 18), 'A', fill=(255, 255, 255, 255))
 
             def on_quit(icon, item):
                 self._running = False
@@ -661,23 +680,40 @@ class WellcomAgent:
 
             def on_show_info(icon, item):
                 connected = "연결됨" if self._ws else "대기 중"
-                logger.info(f"서버: {self.config.api_url} | WS 릴레이: {connected}")
+                info_msg = (
+                    f"에이전트 ID: {self._agent_id}\n"
+                    f"서버: {self.config.api_url}\n"
+                    f"WS 릴레이: {connected}\n"
+                    f"IP: {self._local_ip}"
+                )
+                self._show_toast("WellcomAgent 정보", info_msg)
 
             menu = pystray.Menu(
                 pystray.MenuItem(
-                    'WellcomSOFT Agent',
+                    f'WellcomAgent ({self._agent_id})',
                     on_show_info,
                     default=True,
                 ),
                 pystray.MenuItem('종료', on_quit),
             )
 
-            icon = pystray.Icon('WellcomAgent', img, 'WellcomSOFT Agent', menu)
-            icon.run()
+            self._tray_icon = pystray.Icon('WellcomAgent', img, 'WellcomSOFT Agent', menu)
+            logger.info("트레이 아이콘 시작")
+            self._tray_icon.run()
         except ImportError:
             logger.warning("pystray 미설치 — 트레이 아이콘 없이 실행")
+            self._wait_forever()
         except Exception as e:
             logger.warning(f"트레이 아이콘 실패: {e}")
+            self._wait_forever()
+
+    def _wait_forever(self):
+        """트레이 아이콘 없이 대기 (WS 스레드가 돌고 있으므로 메인 스레드 유지)"""
+        try:
+            while self._running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self._running = False
 
 
 def install_startup():

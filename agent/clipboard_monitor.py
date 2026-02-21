@@ -82,6 +82,13 @@ class ClipboardMonitor:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
+        # DefWindowProcW 인자 타입 명시 (Python 3.14 int overflow 방지)
+        user32.DefWindowProcW.argtypes = [
+            ctypes.wintypes.HWND, ctypes.c_uint,
+            ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM,
+        ]
+        user32.DefWindowProcW.restype = ctypes.c_long
+
         def wnd_proc(hwnd, msg, wparam, lparam):
             if msg == WM_CLIPBOARDUPDATE:
                 if not self._ignore_next:
