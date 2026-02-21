@@ -32,8 +32,8 @@ AGENT_VERSION_FILE = PROJECT_ROOT / "agent" / "version.py"
 
 # ==================== app.zip (매니저) ====================
 # app.zip에 포함할 소스 디렉터리/파일
-INCLUDE_DIRS = ["core", "ui", "agent", "updater"]
-INCLUDE_FILES = ["main.py", "config.py", "version.py", "api_client.py", "launcher.py"]
+INCLUDE_DIRS = ["core", "ui", "updater"]
+INCLUDE_FILES = ["main.py", "config.py", "version.py", "api_client.py"]
 
 # 매니저 app.zip 제외 패턴
 EXCLUDE_PATTERNS = [
