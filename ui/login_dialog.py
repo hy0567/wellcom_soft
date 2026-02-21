@@ -4,7 +4,7 @@ import logging
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QCheckBox, QMessageBox,
-    QFrame,
+    QFrame, QSpacerItem, QSizePolicy,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -16,6 +16,99 @@ logger = logging.getLogger(__name__)
 
 # 기본 서버 URL (config.py의 defaults와 동일)
 DEFAULT_API_URL = 'http://log.wellcomll.org:4797'
+
+# 다크 모던 스타일시트
+_LOGIN_STYLE = """
+QDialog {
+    background: #1e1e1e;
+}
+QLabel {
+    color: #e0e0e0;
+    background: transparent;
+}
+QLabel#title {
+    color: #2196F3;
+}
+QLabel#subtitle {
+    color: #666666;
+    font-size: 11px;
+}
+QLabel#field_label {
+    color: #aaaaaa;
+    font-size: 11px;
+    padding-bottom: 2px;
+}
+QLabel#version_info {
+    color: #555555;
+    font-size: 10px;
+}
+QLineEdit {
+    padding: 10px 12px;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    background: #2a2a2a;
+    color: #e0e0e0;
+    font-size: 13px;
+    selection-background-color: #2196F3;
+}
+QLineEdit:focus {
+    border: 1px solid #2196F3;
+    background: #2d2d2d;
+}
+QLineEdit::placeholder {
+    color: #555555;
+}
+QCheckBox {
+    color: #888888;
+    font-size: 11px;
+    spacing: 6px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: 1px solid #444444;
+    background: #2a2a2a;
+}
+QCheckBox::indicator:checked {
+    background: #2196F3;
+    border: 1px solid #2196F3;
+}
+QPushButton#login_btn {
+    padding: 10px;
+    background: #2196F3;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: bold;
+}
+QPushButton#login_btn:hover {
+    background: #1976D2;
+}
+QPushButton#login_btn:pressed {
+    background: #0D47A1;
+}
+QPushButton#login_btn:disabled {
+    background: #333333;
+    color: #666666;
+}
+QPushButton#cancel_btn {
+    padding: 10px;
+    background: transparent;
+    color: #888888;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    font-size: 13px;
+}
+QPushButton#cancel_btn:hover {
+    background: #2a2a2a;
+    color: #bbbbbb;
+}
+QFrame#separator {
+    color: #333333;
+}
+"""
 
 
 class LoginDialog(QDialog):
@@ -33,77 +126,126 @@ class LoginDialog(QDialog):
 
     def _init_ui(self):
         self.setWindowTitle("WellcomSOFT 로그인")
-        self.setFixedSize(400, 280)
+        self.setFixedSize(420, 380)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
         )
+        self.setStyleSheet(_LOGIN_STYLE)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(8)
+        layout.setContentsMargins(36, 28, 36, 20)
 
         # 타이틀
         title = QLabel("WellcomSOFT")
+        title.setObjectName("title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_font = QFont()
-        title_font.setPointSize(18)
+        title_font.setPointSize(22)
         title_font.setBold(True)
         title.setFont(title_font)
-        title.setStyleSheet("color: #2196F3; margin-bottom: 5px;")
         layout.addWidget(title)
 
+        # 서브 타이틀
         subtitle = QLabel("소프트웨어 기반 다중 PC 원격 관리")
+        subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 10px;")
         layout.addWidget(subtitle)
+
+        layout.addSpacing(6)
 
         # 구분선
         line = QFrame()
+        line.setObjectName("separator")
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: #444;")
+        line.setStyleSheet("color: #333333;")
         layout.addWidget(line)
 
+        layout.addSpacing(8)
+
         # 사용자명
-        layout.addWidget(QLabel("사용자 이름"))
+        lbl_user = QLabel("사용자 이름")
+        lbl_user.setObjectName("field_label")
+        layout.addWidget(lbl_user)
+
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("사용자 이름 입력")
         layout.addWidget(self.username_input)
 
+        layout.addSpacing(4)
+
         # 비밀번호
-        layout.addWidget(QLabel("비밀번호"))
+        lbl_pass = QLabel("비밀번호")
+        lbl_pass.setObjectName("field_label")
+        layout.addWidget(lbl_pass)
+
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setPlaceholderText("비밀번호 입력")
         self.password_input.returnPressed.connect(self._do_login)
         layout.addWidget(self.password_input)
 
+        layout.addSpacing(4)
+
         # 자동 로그인
         self.auto_login_cb = QCheckBox("자동 로그인")
         layout.addWidget(self.auto_login_cb)
+
+        layout.addSpacing(8)
 
         # 버튼
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
         self.login_btn = QPushButton("로그인")
+        self.login_btn.setObjectName("login_btn")
         self.login_btn.setDefault(True)
-        self.login_btn.setMinimumHeight(35)
-        self.login_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; "
-            "border: none; border-radius: 4px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #0D47A1; }"
-        )
+        self.login_btn.setMinimumHeight(42)
         self.login_btn.clicked.connect(self._do_login)
-        btn_layout.addWidget(self.login_btn)
+        btn_layout.addWidget(self.login_btn, stretch=2)
 
         self.cancel_btn = QPushButton("종료")
-        self.cancel_btn.setMinimumHeight(35)
+        self.cancel_btn.setObjectName("cancel_btn")
+        self.cancel_btn.setMinimumHeight(42)
         self.cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.cancel_btn, stretch=1)
 
         layout.addLayout(btn_layout)
+
+        layout.addStretch()
+
+        # 하단 구분선
+        bottom_line = QFrame()
+        bottom_line.setFrameShape(QFrame.Shape.HLine)
+        bottom_line.setStyleSheet("color: #2a2a2a;")
+        layout.addWidget(bottom_line)
+
+        # 하단 버전 + 서버 정보
+        self.version_label = QLabel("")
+        self.version_label.setObjectName("version_info")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.version_label)
+
+        # 버전 정보 로드
+        self._update_version_label()
+
+    def _update_version_label(self):
+        """하단에 버전 + 서버 정보 표시"""
+        try:
+            from version import __version__
+            ver = __version__
+        except ImportError:
+            ver = "?"
+
+        server_url = settings.get('server.api_url', DEFAULT_API_URL)
+        # URL에서 호스트만 추출
+        try:
+            host = server_url.split('://')[1].split(':')[0] if '://' in server_url else server_url
+        except Exception:
+            host = server_url
+
+        self.version_label.setText(f"v{ver}  |  {host}")
 
     def _load_saved(self):
         """저장된 설정 로드"""

@@ -296,15 +296,28 @@ def _compare_versions(current: str, latest: str) -> bool:
         return latest != current
 
 
-def check_and_apply_update():
+def check_and_apply_update(on_status=None, on_progress=None):
     """GitHub Release에서 최신 app.zip 확인 -> 다운로드 -> app/ 교체
 
     app/ 로드 전에 실행. 실패해도 기존 app/로 정상 실행.
+
+    Args:
+        on_status: 상태 메시지 콜백 (str)
+        on_progress: 진행률 콜백 (downloaded, total)
+
+    Returns:
+        dict: {'updated': bool, 'current': str, 'latest': str}
     """
     logger = logging.getLogger('Launcher')
+    result = {'updated': False, 'current': '0.0.0', 'latest': '0.0.0'}
+
+    def _status(msg):
+        if on_status:
+            on_status(msg)
+        logger.info(msg)
 
     if not APP_DIR.exists():
-        return
+        return result
 
     try:
         import requests
@@ -316,10 +329,11 @@ def check_and_apply_update():
             _HAS_REQUESTS = False
         except ImportError:
             logger.debug("HTTP 라이브러리 없음 — 업데이트 스킵")
-            return
+            return result
 
     current_version = _get_installed_version()
-    logger.info(f"현재 매니저 버전: v{current_version}")
+    result['current'] = current_version
+    _status(f"업데이트 확인 중... (v{current_version})")
 
     # 1) GitHub API 최신 릴리스 조회
     api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -329,8 +343,7 @@ def check_and_apply_update():
         if _HAS_REQUESTS:
             resp = requests.get(api_url, headers=headers, timeout=10)
             if resp.status_code != 200:
-                logger.debug(f"GitHub API 응답: {resp.status_code}")
-                return
+                return result
             data = resp.json()
         else:
             req = urllib.request.Request(api_url, headers=headers)
@@ -339,28 +352,31 @@ def check_and_apply_update():
                 data = json.loads(resp.read().decode('utf-8'))
     except Exception as e:
         logger.debug(f"업데이트 확인 실패 (네트워크): {e}")
-        return
+        return result
 
     latest_version = data.get("tag_name", "").lstrip("v")
     if not latest_version:
-        return
+        return result
+    result['latest'] = latest_version
 
     if not _compare_versions(current_version, latest_version):
-        logger.info(f"최신 버전 사용 중: v{current_version}")
-        return
+        _status(f"최신 버전입니다 (v{current_version})")
+        return result
 
-    logger.info(f"업데이트 발견: v{current_version} -> v{latest_version}")
+    _status(f"v{current_version} → v{latest_version} 다운로드 중...")
 
     # 2) app.zip 다운로드 URL 찾기
     download_url = None
+    total_size = 0
     for asset in data.get("assets", []):
         if asset["name"] == ASSET_NAME:
             download_url = asset["browser_download_url"]
+            total_size = asset.get("size", 0)
             break
 
     if not download_url:
         logger.warning(f"릴리스에 {ASSET_NAME} 에셋 없음")
-        return
+        return result
 
     # 3) SHA256 체크섬 파싱
     expected_checksum = ""
@@ -373,34 +389,44 @@ def check_and_apply_update():
             expected_checksum = line.split(':')[-1].strip()
             break
 
-    # 4) 다운로드
+    # 4) 다운로드 (프로그레스 콜백 지원)
     TEMP_DIR.mkdir(exist_ok=True)
     zip_path = TEMP_DIR / ASSET_NAME
 
     try:
-        logger.info(f"다운로드 중: {ASSET_NAME} (v{latest_version})")
+        downloaded = 0
         if _HAS_REQUESTS:
             resp = requests.get(download_url, stream=True, timeout=60)
             resp.raise_for_status()
+            content_length = int(resp.headers.get('content-length', total_size))
             with open(zip_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if on_progress and content_length:
+                        on_progress(downloaded, content_length)
         else:
             req = urllib.request.Request(download_url)
             ctx = ssl.create_default_context()
             with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                content_length = int(resp.headers.get('Content-Length', total_size))
                 with open(zip_path, 'wb') as f:
                     while True:
                         chunk = resp.read(8192)
                         if not chunk:
                             break
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        if on_progress and content_length:
+                            on_progress(downloaded, content_length)
 
         logger.info(f"다운로드 완료: {zip_path} ({zip_path.stat().st_size} bytes)")
     except Exception as e:
         logger.warning(f"다운로드 실패: {e}")
         _cleanup_temp(zip_path)
-        return
+        return result
+
+    _status("검증 중...")
 
     # 5) 체크섬 검증
     if expected_checksum:
@@ -410,22 +436,22 @@ def check_and_apply_update():
                 sha256.update(chunk)
         actual = sha256.hexdigest()
         if actual != expected_checksum:
-            logger.error(f"체크섬 불일치! expected={expected_checksum[:16]}... actual={actual[:16]}...")
+            logger.error(f"체크섬 불일치!")
             _cleanup_temp(zip_path)
-            return
+            return result
         logger.info("체크섬 검증 통과")
 
     # 6) ZIP 유효성 확인
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             if not zf.namelist():
-                logger.error("빈 ZIP 파일")
                 _cleanup_temp(zip_path)
-                return
+                return result
     except zipfile.BadZipFile:
-        logger.error("손상된 ZIP 파일")
         _cleanup_temp(zip_path)
-        return
+        return result
+
+    _status("업데이트 적용 중...")
 
     # 7) 현재 app/ 백업
     try:
@@ -436,7 +462,6 @@ def check_and_apply_update():
                 for fp in APP_DIR.rglob('*'):
                     if fp.is_file() and '__pycache__' not in str(fp):
                         zf.write(fp, fp.relative_to(APP_DIR))
-            logger.info(f"백업 생성: {backup_path.name}")
     except Exception as e:
         logger.warning(f"백업 생성 실패 (계속 진행): {e}")
 
@@ -460,6 +485,8 @@ def check_and_apply_update():
             encoding='utf-8'
         )
 
+        result['updated'] = True
+        _status(f"업데이트 완료! v{latest_version}")
         logger.info(f"업데이트 적용 완료: v{current_version} -> v{latest_version}")
     except Exception as e:
         logger.error(f"업데이트 적용 실패: {e}")
@@ -488,6 +515,8 @@ def check_and_apply_update():
     except Exception:
         pass
 
+    return result
+
 
 def _cleanup_temp(zip_path: Path):
     """temp/ 정리"""
@@ -498,6 +527,173 @@ def _cleanup_temp(zip_path: Path):
             TEMP_DIR.rmdir()
     except Exception:
         pass
+
+
+# ───────────────────────────────────────────
+# 업데이트 스플래시 UI (PyQt6)
+# ───────────────────────────────────────────
+def _create_splash_ui():
+    """UpdateSplashDialog + UpdateWorkerThread 클래스 생성
+
+    PyQt6가 없는 환경(에이전트 등)에서도 런처가 동작하도록
+    함수 내부에서 import + 클래스 정의.
+    """
+    from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+    from PyQt6.QtGui import QFont
+
+    _SPLASH_STYLE = """
+    QDialog {
+        background: #1e1e1e;
+        border: 1px solid #333333;
+    }
+    QLabel {
+        color: #e0e0e0;
+    }
+    QLabel#app_title {
+        color: #2196F3;
+        font-weight: bold;
+    }
+    QLabel#status {
+        color: #aaaaaa;
+        font-size: 11px;
+    }
+    QLabel#pct {
+        color: #888888;
+        font-size: 10px;
+    }
+    QProgressBar {
+        border: none;
+        border-radius: 4px;
+        background: #333333;
+        height: 8px;
+        text-align: center;
+    }
+    QProgressBar::chunk {
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 #4CAF50, stop:1 #66BB6A);
+        border-radius: 4px;
+    }
+    """
+
+    class UpdateWorkerThread(QThread):
+        """업데이트 확인/적용 워커 스레드"""
+        status_changed = pyqtSignal(str)
+        progress_changed = pyqtSignal(int, int)
+        finished = pyqtSignal(dict)  # {'updated': bool, 'current': str, 'latest': str}
+
+        def run(self):
+            result = check_and_apply_update(
+                on_status=lambda msg: self.status_changed.emit(msg),
+                on_progress=lambda d, t: self.progress_changed.emit(d, t),
+            )
+            self.finished.emit(result)
+
+    class UpdateSplashDialog(QDialog):
+        """업데이트 스플래시 화면
+
+        360×180, 프레임리스, 다크 테마.
+        업데이트 확인/다운로드/적용 진행 상황을 시각적으로 표시.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self._result = {'updated': False, 'current': '0.0.0', 'latest': '0.0.0'}
+            self._init_ui()
+
+        def _init_ui(self):
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Dialog
+            )
+            self.setFixedSize(360, 180)
+            self.setStyleSheet(_SPLASH_STYLE)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(30, 24, 30, 24)
+            layout.setSpacing(8)
+
+            # 앱 타이틀
+            title = QLabel("WellcomSOFT")
+            title.setObjectName("app_title")
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_font = QFont()
+            title_font.setPointSize(16)
+            title_font.setBold(True)
+            title.setFont(title_font)
+            layout.addWidget(title)
+
+            # 서브 타이틀
+            sub = QLabel("소프트웨어 기반 다중 PC 원격 관리")
+            sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sub.setStyleSheet("color: #666; font-size: 10px;")
+            layout.addWidget(sub)
+
+            layout.addSpacing(12)
+
+            # 상태 메시지
+            self.status_label = QLabel("시작 중...")
+            self.status_label.setObjectName("status")
+            self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.status_label)
+
+            # 프로그레스바
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setTextVisible(False)
+            layout.addWidget(self.progress_bar)
+
+            # 퍼센트
+            self.pct_label = QLabel("")
+            self.pct_label.setObjectName("pct")
+            self.pct_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.pct_label)
+
+            layout.addStretch()
+
+        def start_update(self):
+            """워커 스레드 시작"""
+            self.worker = UpdateWorkerThread()
+            self.worker.status_changed.connect(self._on_status)
+            self.worker.progress_changed.connect(self._on_progress)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.start()
+
+        def _on_status(self, msg):
+            self.status_label.setText(msg)
+
+        def _on_progress(self, downloaded, total):
+            if total > 0:
+                pct = int(downloaded / total * 100)
+                self.progress_bar.setValue(pct)
+                mb_down = downloaded / (1024 * 1024)
+                mb_total = total / (1024 * 1024)
+                self.pct_label.setText(f"{pct}%  ({mb_down:.1f}/{mb_total:.1f} MB)")
+
+        def _on_finished(self, result):
+            self._result = result
+            if result.get('updated'):
+                self.status_label.setText(
+                    f"업데이트 완료! v{result['latest']} — 앱 시작 중..."
+                )
+                self.progress_bar.setValue(100)
+                self.pct_label.setText("100%")
+            else:
+                current = result.get('current', '0.0.0')
+                self.status_label.setText(f"최신 버전입니다 (v{current})")
+                self.progress_bar.setValue(100)
+                self.pct_label.setText("")
+
+            # 1.5초 후 자동 닫기
+            QTimer.singleShot(1500, self.accept)
+
+        @property
+        def result(self):
+            return self._result
+
+    return UpdateSplashDialog
 
 
 # ───────────────────────────────────────────
@@ -612,11 +808,8 @@ def main():
     # 5. app/ 디렉터리 확인 (최초 실행 시 복사)
     ensure_app_dir()
 
-    # 6. 자동 업데이트 (app/ 로드 전에 실행)
-    try:
-        check_and_apply_update()
-    except Exception as e:
-        logger.warning(f"자동 업데이트 확인 실패 (무시): {e}")
+    # 6. PyQt6 스플래시 + 자동 업데이트
+    _run_splash_update(logger)
 
     # 7. 앱 실행
     try:
@@ -645,6 +838,58 @@ def main():
                     logger.error(f"롤백도 실패: {e2}")
 
         input("엔터를 눌러 종료...")
+
+
+def _run_splash_update(logger):
+    """PyQt6 스플래시로 업데이트 확인/적용
+
+    스플래시용 QApplication은 완료 후 정리하여
+    main.py에서 새 QApplication을 생성할 수 있도록 함.
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+
+        # 스플래시 전용 QApplication
+        splash_app = QApplication(sys.argv)
+        splash_app.setStyle('Fusion')
+
+        UpdateSplashDialog = _create_splash_ui()
+        splash = UpdateSplashDialog()
+
+        # 화면 중앙 배치
+        screen = splash_app.primaryScreen()
+        if screen:
+            geo = screen.geometry()
+            x = (geo.width() - splash.width()) // 2
+            y = (geo.height() - splash.height()) // 2
+            splash.move(x, y)
+
+        splash.show()
+        splash.start_update()
+        splash_app.exec()
+
+        result = splash.result
+        if result.get('updated'):
+            logger.info(f"스플래시 업데이트 적용: v{result['current']} → v{result['latest']}")
+        else:
+            logger.info(f"스플래시: 업데이트 없음 (v{result.get('current', '?')})")
+
+        # QApplication 정리 (main.py에서 새로 생성할 수 있도록)
+        del splash
+        del splash_app
+
+    except ImportError:
+        logger.debug("PyQt6 없음 — 스플래시 없이 업데이트 실행")
+        try:
+            check_and_apply_update()
+        except Exception as e:
+            logger.warning(f"자동 업데이트 확인 실패 (무시): {e}")
+    except Exception as e:
+        logger.warning(f"스플래시 업데이트 실패 (무시): {e}")
+        try:
+            check_and_apply_update()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

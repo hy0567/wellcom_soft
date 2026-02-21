@@ -4,7 +4,7 @@
 ; 출력: dist/WellcomAgent_Setup.exe
 
 #define MyAppName "WellcomAgent"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.4"
 #define MyAppPublisher "Wellcom"
 #define MyAppExeName "WellcomAgent.exe"
 

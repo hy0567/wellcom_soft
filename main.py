@@ -236,7 +236,11 @@ def main():
     # High DPI
     os.environ.setdefault('QT_ENABLE_HIGHDPI_SCALING', '1')
 
-    app = QApplication(sys.argv)
+    # QApplication: 런처 스플래시가 생성했다 삭제한 경우,
+    # 잔존 인스턴스가 있으면 재사용, 없으면 새로 생성
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
     # 버전 정보
