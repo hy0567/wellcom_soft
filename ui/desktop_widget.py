@@ -724,6 +724,9 @@ class DesktopWidget(QMainWindow):
 
         return False
 
+    # v2.1.0: 입력 이벤트 로그 카운터
+    _input_log_count = 0
+
     def _on_key_press(self, event: QKeyEvent):
         key = self._resolve_key(event)
         if not key:
@@ -743,6 +746,8 @@ class DesktopWidget(QMainWindow):
         mods = self._get_modifiers(event)
         if key in ('ctrl', 'shift', 'alt', 'meta'):
             mods = []
+
+        logger.info(f"[{self._pc.name}] ⌨ 키 전송: key={key}, mods={mods}")
 
         # 멀컨 모드면 모든 선택 PC에 전달
         if self._multi_control and self._multi_control.is_active:
@@ -767,6 +772,10 @@ class DesktopWidget(QMainWindow):
     def _on_mouse_press(self, event: QMouseEvent):
         x, y = self._map_mouse(event)
         button = self._button_name(event.button())
+        logger.info(
+            f"[{self._pc.name}] 🖱 클릭 전송: btn={button}, remote=({x},{y}), "
+            f"local=({int(event.position().x())},{int(event.position().y())})"
+        )
         if self._multi_control and self._multi_control.is_active:
             self._multi_control.broadcast_mouse_event(x, y, button, 'press')
         else:

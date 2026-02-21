@@ -474,6 +474,9 @@ class WellcomAgent:
                 logger.info("5초 후 재연결...")
                 await asyncio.sleep(5)
 
+    # v2.1.0: 메시지 수신 카운터 (디버그)
+    _msg_recv_count: int = 0
+
     async def _handle_text(self, websocket, raw: str):
         """JSON 텍스트 메시지 처리"""
         try:
@@ -482,6 +485,10 @@ class WellcomAgent:
             return
 
         msg_type = msg.get('type', '')
+        self._msg_recv_count += 1
+        # 스트리밍 중 메시지 수신 로그 (디버그)
+        if self._streaming and msg_type not in ('ping', 'pong'):
+            logger.info(f"📩 메시지 #{self._msg_recv_count} (스트리밍 중): type={msg_type}")
 
         if msg_type == 'ping':
             await websocket.send(json.dumps({'type': 'pong'}))
@@ -494,7 +501,13 @@ class WellcomAgent:
             quality = msg.get('quality', self.config.screen_quality)
             codec = msg.get('codec', 'h264')  # v2.0.2: 기본 h264, 불가 시 mjpeg 폴백
             keyframe_interval = msg.get('keyframe_interval', 60)
-            await self._start_streaming(websocket, fps, quality, codec, keyframe_interval)
+            # v2.1.0: 백그라운드 태스크로 실행 (메시지 수신 루프 블로킹 방지)
+            if self._stream_task and not self._stream_task.done():
+                self._streaming = False
+                await asyncio.sleep(0.1)  # 이전 스트리밍 종료 대기
+            self._stream_task = asyncio.create_task(
+                self._start_streaming(websocket, fps, quality, codec, keyframe_interval)
+            )
 
         elif msg_type == 'stop_stream':
             self._streaming = False
@@ -524,25 +537,37 @@ class WellcomAgent:
 
         elif msg_type == 'start_thumbnail_push':
             interval = msg.get('interval', 1.0)
-            await self._start_thumbnail_push(websocket, interval)
+            # v2.1.0: 백그라운드 태스크로 실행
+            if self._thumbnail_push_task and not self._thumbnail_push_task.done():
+                self._thumbnail_push = False
+                await asyncio.sleep(0.1)
+            self._thumbnail_push_task = asyncio.create_task(
+                self._start_thumbnail_push(websocket, interval)
+            )
 
         elif msg_type == 'stop_thumbnail_push':
             self._thumbnail_push = False
 
         elif msg_type == 'key_event':
+            key = msg.get('key', '')
+            action = msg.get('action', 'press')
+            modifiers = msg.get('modifiers', [])
+            logger.info(f"⌨ 키 입력: key={key}, action={action}, mods={modifiers}")
             self.input_handler.handle_key_event(
-                key=msg.get('key', ''),
-                action=msg.get('action', 'press'),
-                modifiers=msg.get('modifiers', []),
+                key=key, action=action, modifiers=modifiers,
             )
 
         elif msg_type == 'mouse_event':
+            x = msg.get('x', 0)
+            y = msg.get('y', 0)
+            button = msg.get('button', 'none')
+            action = msg.get('action', 'move')
+            scroll_delta = msg.get('scroll_delta', 0)
+            # move는 너무 빈번하므로 클릭/스크롤만 로그
+            if action != 'move':
+                logger.info(f"🖱 마우스: action={action}, btn={button}, pos=({x},{y}), scroll={scroll_delta}")
             self.input_handler.handle_mouse_event(
-                x=msg.get('x', 0),
-                y=msg.get('y', 0),
-                button=msg.get('button', 'none'),
-                action=msg.get('action', 'move'),
-                scroll_delta=msg.get('scroll_delta', 0),
+                x=x, y=y, button=button, action=action, scroll_delta=scroll_delta,
             )
 
         elif msg_type == 'clipboard':

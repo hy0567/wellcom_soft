@@ -251,14 +251,41 @@ class AgentServer(QObject):
 
     # ==================== 내부 구현 ====================
 
+    # v2.1.0: 입력 명령 전송 카운터 (디버그)
+    _input_send_count: int = 0
+
     def _send_to_agent(self, agent_id: str, msg_dict: dict):
         """서버 릴레이를 통해 에이전트에 JSON 메시지 전송"""
         if not self._ws or not self._loop or not self._loop.is_running():
+            msg_type = msg_dict.get('type', '?')
+            if msg_type in ('mouse_event', 'key_event'):
+                logger.warning(
+                    f"[AgentServer] 입력 전송 실패 — WS 미연결: type={msg_type}, "
+                    f"ws={'있음' if self._ws else '없음'}, "
+                    f"loop={'실행중' if self._loop and self._loop.is_running() else '없음'}"
+                )
             return
 
         # target_agent 필드 추가 (서버가 라우팅)
         msg_dict['target_agent'] = agent_id
         msg = json.dumps(msg_dict)
+
+        # v2.1.0: 입력 이벤트 전송 로그 (클릭/키만, move 제외)
+        msg_type = msg_dict.get('type', '')
+        if msg_type == 'key_event':
+            self._input_send_count += 1
+            logger.info(
+                f"[AgentServer] 키 전송 #{self._input_send_count}: "
+                f"key={msg_dict.get('key')}, agent={agent_id}"
+            )
+        elif msg_type == 'mouse_event' and msg_dict.get('action') != 'move':
+            self._input_send_count += 1
+            logger.info(
+                f"[AgentServer] 마우스 전송 #{self._input_send_count}: "
+                f"action={msg_dict.get('action')}, btn={msg_dict.get('button')}, "
+                f"pos=({msg_dict.get('x')},{msg_dict.get('y')}), agent={agent_id}"
+            )
+
         asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
 
     def _send_binary_to_agent(self, agent_id: str, data: bytes):
