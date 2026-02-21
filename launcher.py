@@ -179,20 +179,33 @@ def migrate_data_if_needed():
 # 로깅
 # ───────────────────────────────────────────
 def setup_logging():
-    """로그 설정"""
+    """로그 설정
+
+    console=False EXE에서는 sys.stdout이 None이므로
+    StreamHandler 대신 FileHandler만 사용.
+    """
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         # 설치 전이면 로그 디렉터리가 없을 수 있음
         pass
 
-    handlers = [logging.StreamHandler()]
+    handlers = []
+
+    # stdout이 유효할 때만 StreamHandler 추가 (console=False EXE에서는 None)
+    if sys.stdout is not None and hasattr(sys.stdout, 'write'):
+        handlers.append(logging.StreamHandler(sys.stdout))
+
     try:
         handlers.append(
             logging.FileHandler(LOG_DIR / 'wellcomsoft.log', encoding='utf-8')
         )
     except Exception:
         pass
+
+    # 핸들러가 하나도 없으면 NullHandler
+    if not handlers:
+        handlers.append(logging.NullHandler())
 
     logging.basicConfig(
         level=logging.INFO,

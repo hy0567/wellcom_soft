@@ -27,41 +27,56 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 # ==================== 로깅 ====================
 
 class LogTee:
-    """stdout/stderr → 콘솔 + 파일 동시 출력"""
+    """stdout/stderr → 콘솔 + 파일 동시 출력
 
-    def __init__(self, log_path: str, stream):
-        self._stream = stream
+    console=False EXE에서 sys.stdout/stderr가 None인 경우를 안전하게 처리.
+    """
+
+    def __init__(self, log_path: str, stream=None):
+        self._stream = stream  # None일 수 있음 (console=False EXE)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self._file = open(log_path, 'a', encoding='utf-8', buffering=1)
 
     def write(self, msg):
         if msg:
-            try:
-                self._stream.write(msg)
-            except Exception:
-                pass
+            if self._stream is not None:
+                try:
+                    self._stream.write(msg)
+                except Exception:
+                    pass
             try:
                 self._file.write(msg)
             except Exception:
                 pass
 
     def flush(self):
-        try:
-            self._stream.flush()
-        except Exception:
-            pass
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+            except Exception:
+                pass
         try:
             self._file.flush()
         except Exception:
             pass
 
     def fileno(self):
-        return self._stream.fileno()
+        if self._stream is not None:
+            return self._stream.fileno()
+        raise OSError("underlying stream is None")
 
 
 def setup_logging():
-    """로깅 설정"""
+    """로깅 설정
+
+    console=False EXE에서는 sys.stdout/stderr가 None이므로:
+    - LogTee로 파일 출력을 보장 (콘솔은 None이면 스킵)
+    - StreamHandler 대신 FileHandler 사용 (stdout이 None일 때)
+    """
     log_path = os.path.join(LOG_DIR, "app.log")
+
+    # 로그 디렉터리 보장
+    os.makedirs(LOG_DIR, exist_ok=True)
 
     # 로그 파일 크기 제한 (1MB)
     try:
@@ -75,13 +90,33 @@ def setup_logging():
 
     # EXE 환경에서 stdout/stderr 리디렉트
     if getattr(sys, 'frozen', False):
-        sys.stdout = LogTee(log_path, sys.stdout or sys.__stdout__)
-        sys.stderr = LogTee(log_path, sys.stderr or sys.__stderr__)
+        # stdout/stderr가 None이면 LogTee가 파일에만 출력
+        sys.stdout = LogTee(log_path, sys.stdout)
+        sys.stderr = LogTee(log_path, sys.stderr)
+
+    # 로깅 핸들러 설정
+    handlers = []
+
+    # stdout이 유효할 때만 StreamHandler 추가
+    if sys.stdout is not None and hasattr(sys.stdout, 'write'):
+        handlers.append(logging.StreamHandler(sys.stdout))
+
+    # FileHandler도 추가 (이중 안전)
+    try:
+        handlers.append(
+            logging.FileHandler(log_path, encoding='utf-8')
+        )
+    except Exception:
+        pass
+
+    # 핸들러가 하나도 없으면 NullHandler라도 추가
+    if not handlers:
+        handlers.append(logging.NullHandler())
 
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-        handlers=[logging.StreamHandler()],
+        handlers=handlers,
     )
 
 
