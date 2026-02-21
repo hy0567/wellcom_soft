@@ -597,14 +597,19 @@ class WellcomAgent:
     async def _send_thumbnail(self, websocket):
         """썸네일 캡처 및 전송"""
         try:
+            logger.info("썸네일 캡처 시작...")
             jpeg_data = self.screen_capture.capture_thumbnail(
                 max_width=self.config.thumbnail_width,
                 quality=self.config.thumbnail_quality,
             )
+            if not jpeg_data:
+                logger.error("썸네일 캡처 결과 비어 있음 (0 bytes)")
+                return
+            logger.info(f"썸네일 캡처 완료: {len(jpeg_data)}B, 전송 중...")
             await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
-            logger.debug(f"썸네일 전송 완료: {len(jpeg_data)}B")
+            logger.info(f"썸네일 전송 완료: {len(jpeg_data)}B")
         except Exception as e:
-            logger.error(f"썸네일 전송 실패: {type(e).__name__}: {e}")
+            logger.error(f"썸네일 전송 실패: {type(e).__name__}: {e}", exc_info=True)
 
     async def _stream_loop(self, websocket, fps: int, quality: int):
         """화면 스트리밍 루프"""

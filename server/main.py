@@ -759,25 +759,30 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                 pass
 
         # 메시지 릴레이 루프
+        agent_msg_count = 0
         while True:
             message = await ws.receive()
             msg_type = message.get("type")
 
             if msg_type == "websocket.receive":
+                agent_msg_count += 1
                 mgr_ws = _ws_managers.get(owner_id)
-                if not mgr_ws:
-                    # 매니저 미접속 — 메시지 버림
-                    continue
 
                 if "text" in message:
-                    # JSON 메시지 — source_agent 추가 후 매니저에 전달
                     raw_text = message["text"]
                     try:
                         data = json.loads(raw_text)
                     except json.JSONDecodeError:
+                        logger.warning(f"[Agent {agent_id}] #{agent_msg_count} JSON 파싱 실패")
                         continue
 
                     msg_cmd = data.get("type", "?")
+                    logger.info(f"[Agent {agent_id}] #{agent_msg_count} 수신: type={msg_cmd}")
+
+                    if not mgr_ws:
+                        logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 메시지 버림: type={msg_cmd}")
+                        continue
+
                     data["source_agent"] = agent_id
                     try:
                         await mgr_ws.send_text(json.dumps(data))
@@ -786,8 +791,13 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                         logger.warning(f"[Relay A→M] 전달 실패: {e}")
 
                 elif "bytes" in message:
-                    # 바이너리 메시지 — agent_id(32) 프리픽스 추가
                     raw_bytes = message["bytes"]
+                    logger.info(f"[Agent {agent_id}] #{agent_msg_count} 수신: binary ({len(raw_bytes)}B), header=0x{raw_bytes[0]:02x}" if raw_bytes else f"[Agent {agent_id}] #{agent_msg_count} 수신: empty bytes")
+
+                    if not mgr_ws:
+                        logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 바이너리 버림")
+                        continue
+
                     prefixed = _pad_agent_id(agent_id) + raw_bytes
                     try:
                         await mgr_ws.send_bytes(prefixed)
@@ -796,6 +806,7 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                         logger.warning(f"[Relay A→M] 바이너리 전달 실패: {e}")
 
             elif msg_type == "websocket.disconnect":
+                logger.info(f"[Agent {agent_id}] WS 종료 (총 {agent_msg_count}개 메시지 수신)")
                 break
 
     except asyncio.TimeoutError:
