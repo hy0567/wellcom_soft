@@ -14,9 +14,16 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# 기본 서버 URL (config.py의 defaults와 동일)
+DEFAULT_API_URL = 'http://log.wellcomll.org:4797'
+
 
 class LoginDialog(QDialog):
-    """서버 로그인 다이얼로그"""
+    """서버 로그인 다이얼로그
+
+    서버 주소는 기본값 사용 (사용자 입력 불필요).
+    사용자 이름 + 비밀번호만 입력.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -26,7 +33,7 @@ class LoginDialog(QDialog):
 
     def _init_ui(self):
         self.setWindowTitle("WellcomSOFT 로그인")
-        self.setFixedSize(400, 320)
+        self.setFixedSize(400, 280)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
@@ -56,12 +63,6 @@ class LoginDialog(QDialog):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet("color: #444;")
         layout.addWidget(line)
-
-        # 서버 URL
-        layout.addWidget(QLabel("서버 주소"))
-        self.server_input = QLineEdit()
-        self.server_input.setPlaceholderText("http://log.wellcomll.org:4797")
-        layout.addWidget(self.server_input)
 
         # 사용자명
         layout.addWidget(QLabel("사용자 이름"))
@@ -106,23 +107,23 @@ class LoginDialog(QDialog):
 
     def _load_saved(self):
         """저장된 설정 로드"""
-        api_url = settings.get('server.api_url', '')
         username = settings.get('server.username', '')
         auto_login = settings.get('server.auto_login', False)
 
-        if api_url:
-            self.server_input.setText(api_url)
         if username:
             self.username_input.setText(username)
         self.auto_login_cb.setChecked(auto_login)
 
+        # api_client의 base_url을 기본값으로 동기화
+        api_client._base_url = settings.get('server.api_url', DEFAULT_API_URL)
+
         # 자동 로그인 시도
-        if auto_login and api_url and username:
+        if auto_login and username:
             token = settings.get('server.token', '')
             if token:
-                self._try_auto_login(api_url)
+                self._try_auto_login()
 
-    def _try_auto_login(self, api_url: str):
+    def _try_auto_login(self):
         """저장된 토큰으로 자동 로그인 시도"""
         try:
             if api_client.verify_token():
@@ -134,14 +135,8 @@ class LoginDialog(QDialog):
 
     def _do_login(self):
         """로그인 실행"""
-        api_url = self.server_input.text().strip()
         username = self.username_input.text().strip()
         password = self.password_input.text()
-
-        if not api_url:
-            QMessageBox.warning(self, "입력 오류", "서버 주소를 입력하세요.")
-            self.server_input.setFocus()
-            return
 
         if not username:
             QMessageBox.warning(self, "입력 오류", "사용자 이름을 입력하세요.")
@@ -152,9 +147,6 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "입력 오류", "비밀번호를 입력하세요.")
             self.password_input.setFocus()
             return
-
-        # 서버 URL 저장
-        settings.set('server.api_url', api_url)
 
         # 로그인 버튼 비활성화
         self.login_btn.setEnabled(False)
@@ -175,7 +167,7 @@ class LoginDialog(QDialog):
             if 'Connection' in err_msg:
                 QMessageBox.critical(
                     self, "연결 실패",
-                    f"서버에 연결할 수 없습니다.\n\n{api_url}\n\n서버 주소를 확인하세요."
+                    f"서버에 연결할 수 없습니다.\n\n서버 상태를 확인하세요."
                 )
             elif '401' in err_msg or '사용자' in err_msg or '비밀번호' in err_msg:
                 QMessageBox.warning(
