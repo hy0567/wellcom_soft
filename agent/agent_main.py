@@ -53,11 +53,45 @@ from input_handler import InputHandler
 from clipboard_monitor import ClipboardMonitor
 from file_receiver import FileReceiver
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+def _setup_logging():
+    """로깅 설정 — 콘솔 + 파일 동시 출력"""
+    log_fmt = '%(asctime)s [%(name)s] %(levelname)s: %(message)s'
+    handlers = []
+
+    # 콘솔 핸들러 (console=True 빌드 또는 개발 환경)
+    try:
+        handlers.append(logging.StreamHandler())
+    except Exception:
+        pass
+
+    # 파일 핸들러 (설치 디렉터리 또는 현재 디렉터리)
+    try:
+        import os as _os
+        base = _os.environ.get('WELLCOMAGENT_BASE_DIR', '')
+        if not base or not _os.path.isdir(base):
+            if getattr(sys, 'frozen', False):
+                base = _os.path.dirname(sys.executable)
+            else:
+                base = _os.path.dirname(_os.path.abspath(__file__))
+        log_dir = _os.path.join(base, 'logs')
+        _os.makedirs(log_dir, exist_ok=True)
+        log_path = _os.path.join(log_dir, 'agent.log')
+        # 로그 파일 크기 제한 (500KB)
+        if _os.path.exists(log_path) and _os.path.getsize(log_path) > 500_000:
+            bak = log_path + '.bak'
+            if _os.path.exists(bak):
+                _os.remove(bak)
+            _os.rename(log_path, bak)
+        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
+    except Exception:
+        pass
+
+    if not handlers:
+        handlers.append(logging.NullHandler())
+
+    logging.basicConfig(level=logging.INFO, format=log_fmt, handlers=handlers)
+
+_setup_logging()
 logger = logging.getLogger('WellcomAgent')
 
 STARTUP_REG_KEY = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
