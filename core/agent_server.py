@@ -335,8 +335,9 @@ class AgentServer(QObject):
                 async with websockets.connect(
                     ws_url,
                     max_size=50 * 1024 * 1024,
-                    ping_interval=30,
-                    ping_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
                 ) as ws:
                     self._ws = ws
                     self._binary_frame_count = 0

@@ -92,6 +92,13 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("준비")
         self.statusBar().addWidget(self.status_label, 1)
 
+        # v2.0.9 — WS 연결 상태 인디케이터
+        self._ws_status_label = QLabel("● WS 연결 중")
+        self._ws_status_label.setStyleSheet(
+            "color: #FFA726; padding: 0 6px; font-size: 11px; font-weight: bold;"
+        )
+        self.statusBar().addPermanentWidget(self._ws_status_label)
+
         self.multi_label = QLabel("")
         self.statusBar().addPermanentWidget(self.multi_label)
 
@@ -592,11 +599,24 @@ class MainWindow(QMainWindow):
         stats = self.pc_manager.get_statistics()
         self.agent_count_label.setText(f"에이전트: {stats['online']}/{stats['total']}")
         username = api_client.username or '미로그인'
-        server_port = settings.get('agent_server.port', 9877)
+
+        # v2.0.9 — WS 연결 상태
+        ws_connected = self.agent_server._ws is not None
+        connected_count = self.agent_server.connected_count
+        if ws_connected:
+            self._ws_status_label.setText(f"● WS 연결됨 ({connected_count}대)")
+            self._ws_status_label.setStyleSheet(
+                "color: #4CAF50; padding: 0 6px; font-size: 11px; font-weight: bold;"
+            )
+        else:
+            self._ws_status_label.setText("● WS 연결 끊김")
+            self._ws_status_label.setStyleSheet(
+                "color: #F44336; padding: 0 6px; font-size: 11px; font-weight: bold;"
+            )
+
         self.status_label.setText(
             f"사용자: {username} | "
-            f"서버 포트: {server_port} | "
-            f"연결: {self.agent_server.connected_count}대"
+            f"WS릴레이: {connected_count}대"
         )
 
     # ==================== 업데이트 / 정보 ====================

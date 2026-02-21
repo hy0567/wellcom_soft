@@ -421,8 +421,9 @@ class WellcomAgent:
                 async with websockets.connect(
                     uri,
                     max_size=50 * 1024 * 1024,
-                    ping_interval=30,
-                    ping_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
                 ) as ws:
                     self._ws = ws
 
@@ -676,8 +677,9 @@ class WellcomAgent:
         }))
 
         logger.info(
-            f"스트리밍 시작: {actual_codec} ({encoder_name or 'jpeg'}), "
-            f"{self._stream_fps}fps, Q={self._stream_quality}"
+            f"★ 스트리밍 시작: codec={actual_codec} ({encoder_name or 'jpeg'}), "
+            f"{self._stream_fps}fps, Q={self._stream_quality}, "
+            f"해상도={screen_w}x{screen_h}"
         )
 
         try:
@@ -686,21 +688,21 @@ class WellcomAgent:
             else:
                 await self._stream_mjpeg(websocket)
         except websockets.exceptions.ConnectionClosed:
-            pass
+            logger.info("스트리밍 중단 — WS 연결 종료")
         except Exception as e:
-            logger.debug(f"스트리밍 오류: {e}")
+            logger.warning(f"스트리밍 오류: {e}")
         finally:
             self._streaming = False
             if self._h264_encoder:
                 self._h264_encoder.close()
                 self._h264_encoder = None
-            logger.info("스트리밍 중지")
+            logger.info("★ 스트리밍 종료")
 
     async def _stream_mjpeg(self, websocket):
         """MJPEG 스트리밍 루프
 
         서버 릴레이 대역폭을 고려하여 적절한 해상도 스케일링.
-        에러 복구 포함.
+        에러 복구 포함. v2.0.9: 프레임 타이밍 보정 + 디버그 로그
         """
         screen_w, screen_h = self.screen_capture.screen_size
         # 1080p 이상이면 720p로 다운스케일 (대역폭 최적화)
@@ -709,13 +711,25 @@ class WellcomAgent:
         else:
             scale = 1.0
 
-        logger.info(f"MJPEG 스트리밍: {screen_w}x{screen_h} "
+        logger.info(f"MJPEG 스트리밍 시작: {screen_w}x{screen_h} "
                      f"→ scale={scale:.2f}, Q={self._stream_quality}, "
-                     f"{self._stream_fps}fps")
+                     f"target={self._stream_fps}fps")
 
         consecutive_errors = 0
+        frame_count = 0
+        fps_start = time.time()
+        target_interval = 1.0 / max(1, self._stream_fps)
+        next_frame_time = time.time()
+
         while self._streaming and self._running:
             try:
+                now = time.time()
+                # 프레임 타이밍 보정: sleep 대신 목표 시간까지 대기
+                wait_time = next_frame_time - now
+                if wait_time > 0.001:
+                    await asyncio.sleep(wait_time)
+
+                capture_start = time.time()
                 jpeg_data = self.screen_capture.capture_jpeg(
                     quality=self._stream_quality,
                     scale=scale,
@@ -723,10 +737,29 @@ class WellcomAgent:
                 if jpeg_data:
                     await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
                     consecutive_errors = 0
+                    frame_count += 1
 
-                interval = 1.0 / max(1, self._stream_fps)
-                await asyncio.sleep(interval)
+                    # 다음 프레임 목표 시간 계산 (누적 보정)
+                    target_interval = 1.0 / max(1, self._stream_fps)
+                    next_frame_time = time.time() + target_interval
+
+                    # 5초마다 FPS 로그
+                    elapsed = time.time() - fps_start
+                    if elapsed >= 5.0:
+                        actual_fps = frame_count / elapsed
+                        capture_ms = (time.time() - capture_start) * 1000
+                        logger.info(
+                            f"MJPEG: {actual_fps:.1f}fps (목표 {self._stream_fps}), "
+                            f"프레임크기={len(jpeg_data)}B, "
+                            f"캡처+전송={capture_ms:.0f}ms"
+                        )
+                        frame_count = 0
+                        fps_start = time.time()
+                else:
+                    next_frame_time = time.time() + target_interval
+
             except websockets.exceptions.ConnectionClosed:
+                logger.info(f"MJPEG 스트리밍 중단 — WS 연결 종료 (프레임 #{frame_count})")
                 raise
             except Exception as e:
                 consecutive_errors += 1
@@ -734,7 +767,7 @@ class WellcomAgent:
                 if consecutive_errors >= 10:
                     logger.warning("MJPEG 연속 에러 10회 — 스트리밍 중단")
                     break
-                await asyncio.sleep(0.1)
+                next_frame_time = time.time() + 0.1
 
     async def _stream_h264(self, websocket):
         """H.264 스트리밍 루프 (v2.0.2)"""

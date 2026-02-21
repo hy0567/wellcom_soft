@@ -4,6 +4,7 @@ LinkIO Desktop의 DesktopWidget 재현.
 탭이 아닌 독립 QMainWindow로 열리며, 전체화면/사이드메뉴/단축키를 지원.
 
 v2.0.1: 상태바(FPS/해상도/화질), 화질/FPS 조절, 특수키, 화면 비율 토글
+v2.0.9: 시각적 연결 상태 + 세밀한 디버그 로그 + FPS 계측 개선
 """
 
 import logging
@@ -12,11 +13,11 @@ import time
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QFileDialog, QInputDialog,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QInputDialog,
     QMessageBox, QApplication, QStatusBar, QLabel,
 )
 from PyQt6.QtCore import Qt, QByteArray, pyqtSignal, QTimer
-from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent, QFont
+from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent, QFont, QColor
 
 from config import settings
 from core.pc_device import PCDevice
@@ -160,6 +161,12 @@ class RemoteScreenWidget(QWidget):
 
         return max(0, min(rx, screen_w - 1)), max(0, min(ry, screen_h - 1))
 
+    def set_overlay_text(self, text: str, color: str = '#FFD600'):
+        """화면 위에 상태 오버레이 텍스트 설정 (빈 문자열=숨김)"""
+        self._overlay_text = text
+        self._overlay_color = color
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
@@ -167,6 +174,23 @@ class RemoteScreenWidget(QWidget):
             x = (self.width() - self._scaled_pixmap.width()) // 2
             y = (self.height() - self._scaled_pixmap.height()) // 2
             painter.drawPixmap(x, y, self._scaled_pixmap)
+
+        # 상태 오버레이
+        overlay = getattr(self, '_overlay_text', '')
+        if overlay:
+            overlay_color = getattr(self, '_overlay_color', '#FFD600')
+            font = QFont("Segoe UI", 14, QFont.Weight.Bold)
+            painter.setFont(font)
+            # 반투명 배경
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(overlay) + 24
+            th = fm.height() + 12
+            bx = (self.width() - tw) // 2
+            by = self.height() // 2 - th // 2
+            painter.fillRect(bx, by, tw, th, QColor(0, 0, 0, 180))
+            painter.setPen(QColor(overlay_color))
+            painter.drawText(bx, by, tw, th,
+                             Qt.AlignmentFlag.AlignCenter, overlay)
 
     def resizeEvent(self, event):
         new_size = (self.width(), self.height())
@@ -201,12 +225,19 @@ class DesktopWidget(QMainWindow):
         self._last_mouse_move_time = 0.0
         self._mouse_move_interval = 0.033  # ~30fps 마우스 이동 제한 (릴레이 최적)
 
-        # v2.0.7 — 1:1 제어 품질 향상 (LinkIO 참고: 60fps/8Mbps)
-        self._frame_count = 0
+        # v2.0.9 — 프레임 계측 개선 (누적 카운트 + FPS 측정 분리)
+        self._fps_frame_count = 0    # FPS 계측용 (1초마다 리셋)
+        self._total_frame_count = 0  # 누적 프레임 수 (리셋 안 함)
         self._current_fps = 0
         self._current_quality = settings.get('screen.stream_quality', 70)
         self._current_target_fps = settings.get('screen.stream_fps', 30)
         self._is_stretch = False   # 화면 비율 모드
+        self._stream_start_time = time.time()
+        self._first_frame_time = 0.0
+
+        # 연결 상태 추적 (시각 피드백용)
+        self._conn_state = 'connecting'  # connecting → waiting → streaming → disconnected
+        self._stream_requested = False
 
         # v2.0.2 — H.264 디코더
         self._h264_decoder: Optional[H264Decoder] = None
@@ -221,7 +252,7 @@ class DesktopWidget(QMainWindow):
         self._fps_timer.timeout.connect(self._update_fps_display)
         self._fps_timer.start(1000)
 
-        # 스트리밍 시작 (v2.0.2: H.264 코덱 협상)
+        # 스트리밍 시작
         preferred_codec = settings.get('screen.stream_codec', 'h264')
         keyframe_interval = settings.get('screen.keyframe_interval', 60)
 
@@ -232,6 +263,15 @@ class DesktopWidget(QMainWindow):
                 logger.info(f"[{pc.name}] H.264 디코더 미지원 — MJPEG으로 요청")
                 preferred_codec = 'mjpeg'
             test_decoder.close()
+
+        # 연결 상태: 스트림 요청 중
+        self._conn_state = 'waiting'
+        self._stream_requested = True
+        self._screen.set_overlay_text('⏳ 스트림 요청 중...')
+        logger.info(
+            f"[{pc.name}] 스트림 요청: codec={preferred_codec}, "
+            f"fps={self._current_target_fps}, Q={self._current_quality}"
+        )
 
         self._server.start_streaming(
             pc.agent_id,
@@ -298,7 +338,7 @@ class DesktopWidget(QMainWindow):
         self._init_statusbar()
 
     def _init_statusbar(self):
-        """상태바 초기화 — FPS/해상도/화질/비율 표시"""
+        """상태바 초기화 — 연결상태/FPS/해상도/화질/코덱/비율"""
         sb = self.statusBar()
         sb.setStyleSheet("""
             QStatusBar {
@@ -309,9 +349,16 @@ class DesktopWidget(QMainWindow):
             }
             QStatusBar::item { border: none; }
         """)
-        sb.setFixedHeight(22)
+        sb.setFixedHeight(24)
 
         label_style = "color: #aaa; padding: 0 6px; font-size: 11px;"
+
+        # 연결 상태 인디케이터 (● 원형)
+        self._conn_indicator = QLabel("● 연결 중")
+        self._conn_indicator.setStyleSheet(
+            "color: #FFA726; padding: 0 8px; font-size: 11px; font-weight: bold;"
+        )
+        sb.addWidget(self._conn_indicator)
 
         self._res_label = QLabel("-- x --")
         self._res_label.setStyleSheet(label_style)
@@ -333,10 +380,26 @@ class DesktopWidget(QMainWindow):
         self._ratio_label.setStyleSheet(label_style)
         sb.addPermanentWidget(self._ratio_label)
 
+    def _update_conn_state(self, state: str):
+        """연결 상태 업데이트 + 시각 피드백"""
+        self._conn_state = state
+        styles = {
+            'connecting': ("● 연결 중", "#FFA726"),       # 주황
+            'waiting':    ("● 스트림 대기", "#FFA726"),    # 주황
+            'streaming':  ("● 스트리밍", "#4CAF50"),       # 초록
+            'disconnected': ("● 연결 끊김", "#F44336"),    # 빨강
+        }
+        text, color = styles.get(state, ("● ?", "#888"))
+        self._conn_indicator.setText(text)
+        self._conn_indicator.setStyleSheet(
+            f"color: {color}; padding: 0 8px; font-size: 11px; font-weight: bold;"
+        )
+
     def _connect_signals(self):
         self._server.screen_frame_received.connect(self._on_frame_received)
         self._server.h264_frame_received.connect(self._on_h264_frame)
         self._server.stream_started.connect(self._on_stream_started)
+        self._server.agent_disconnected.connect(self._on_agent_disconnected)
 
     def _load_geometry(self):
         """저장된 창 위치/크기 복원"""
@@ -365,18 +428,30 @@ class DesktopWidget(QMainWindow):
         if agent_id != self._pc.agent_id:
             return
         self._screen.update_frame(jpeg_data)
-        self._frame_count += 1
+        self._fps_frame_count += 1
+        self._total_frame_count += 1
 
-        # 첫 프레임 + 100프레임마다 로깅
-        if self._frame_count == 1:
-            logger.info(f"[{self._pc.name}] 첫 프레임 수신: {len(jpeg_data)}B")
-        elif self._frame_count % 100 == 0:
-            logger.info(f"[{self._pc.name}] 프레임 #{self._frame_count}: {len(jpeg_data)}B")
+        # 첫 프레임 수신 시
+        if self._total_frame_count == 1:
+            self._first_frame_time = time.time()
+            elapsed = self._first_frame_time - self._stream_start_time
+            logger.info(
+                f"[{self._pc.name}] ★ 첫 프레임 수신! "
+                f"size={len(jpeg_data)}B, 대기시간={elapsed:.2f}초"
+            )
+            self._screen.set_overlay_text('')  # 오버레이 숨김
+            self._update_conn_state('streaming')
+        elif self._total_frame_count % 300 == 0:
+            logger.info(
+                f"[{self._pc.name}] 프레임 #{self._total_frame_count}: "
+                f"{len(jpeg_data)}B, FPS={self._current_fps}"
+            )
 
-        # 해상도 표시 갱신
-        pix = self._screen.current_pixmap
-        if not pix.isNull():
-            self._res_label.setText(f"{pix.width()} x {pix.height()}")
+        # 해상도 표시 갱신 (30프레임마다)
+        if self._total_frame_count <= 1 or self._total_frame_count % 30 == 0:
+            pix = self._screen.current_pixmap
+            if not pix.isNull():
+                self._res_label.setText(f"{pix.width()} x {pix.height()}")
 
     # ==================== 코덱 협상 (v2.0.2) ====================
 
@@ -387,14 +462,28 @@ class DesktopWidget(QMainWindow):
 
         codec = info.get('codec', 'mjpeg')
         encoder = info.get('encoder', '')
+        width = info.get('width', 0)
+        height = info.get('height', 0)
+        fps = info.get('fps', 0)
+        quality = info.get('quality', 0)
         self._stream_codec = codec
+
+        elapsed = time.time() - self._stream_start_time
+        logger.info(
+            f"[{self._pc.name}] ★ stream_started 수신: codec={codec}, "
+            f"encoder={encoder}, {width}x{height}, "
+            f"fps={fps}, Q={quality}, 응답시간={elapsed:.2f}초"
+        )
+
+        self._screen.set_overlay_text('⏳ 프레임 수신 대기...')
+        self._update_conn_state('waiting')
 
         if codec == 'h264':
             # H.264 디코더 초기화
             self._h264_decoder = H264Decoder()
             if self._h264_decoder.is_available:
                 logger.info(
-                    f"[{self._pc.name}] H.264 스트리밍 (인코더: {encoder})"
+                    f"[{self._pc.name}] H.264 디코더 활성화 (인코더: {encoder})"
                 )
                 self._codec_label.setText(f"H.264 ({encoder})")
             else:
@@ -404,23 +493,36 @@ class DesktopWidget(QMainWindow):
                 self._h264_decoder = None
                 self._stream_codec = 'mjpeg'
                 self._codec_label.setText("MJPEG")
+                self._screen.set_overlay_text('🔄 MJPEG 전환 중...')
                 # 에이전트에 MJPEG으로 재시작 요청
                 self._server.stop_streaming(self._pc.agent_id)
                 QTimer.singleShot(200, self._restart_as_mjpeg)
         else:
             self._h264_decoder = None
-            logger.info(f"[{self._pc.name}] MJPEG 스트리밍")
+            logger.info(f"[{self._pc.name}] MJPEG 스트리밍 대기 — 프레임 수신 대기")
             self._codec_label.setText("MJPEG")
 
     def _restart_as_mjpeg(self):
         """H.264 불가 시 MJPEG으로 스트리밍 재시작"""
         logger.info(f"[{self._pc.name}] MJPEG으로 스트리밍 재시작")
+        self._screen.set_overlay_text('⏳ MJPEG 스트림 요청 중...')
         self._server.start_streaming(
             self._pc.agent_id,
             fps=self._current_target_fps,
             quality=self._current_quality,
             codec='mjpeg',
         )
+
+    def _on_agent_disconnected(self, agent_id: str):
+        """에이전트 연결 해제 감지"""
+        if agent_id != self._pc.agent_id:
+            return
+        logger.warning(
+            f"[{self._pc.name}] ⚠ 에이전트 연결 해제! "
+            f"총 수신 프레임: {self._total_frame_count}"
+        )
+        self._update_conn_state('disconnected')
+        self._screen.set_overlay_text('❌ 에이전트 연결 끊김', '#F44336')
 
     # ==================== H.264 프레임 수신 (v2.0.2) ====================
 
@@ -435,10 +537,21 @@ class DesktopWidget(QMainWindow):
         qimage = self._h264_decoder.decode_frame(header, raw_data)
         if qimage:
             self._screen.update_frame_qimage(qimage)
-            self._frame_count += 1
+            self._fps_frame_count += 1
+            self._total_frame_count += 1
 
-            # 해상도 표시 갱신
-            self._res_label.setText(f"{qimage.width()} x {qimage.height()}")
+            if self._total_frame_count == 1:
+                self._first_frame_time = time.time()
+                elapsed = self._first_frame_time - self._stream_start_time
+                logger.info(
+                    f"[{self._pc.name}] ★ H.264 첫 프레임 수신! 대기시간={elapsed:.2f}초"
+                )
+                self._screen.set_overlay_text('')
+                self._update_conn_state('streaming')
+
+            # 해상도 표시 갱신 (30프레임마다)
+            if self._total_frame_count <= 1 or self._total_frame_count % 30 == 0:
+                self._res_label.setText(f"{qimage.width()} x {qimage.height()}")
         elif self._h264_decoder.waiting_for_keyframe:
             # 키프레임 대기 중 — 에이전트에 요청
             self._server.request_keyframe(self._pc.agent_id)
@@ -447,9 +560,30 @@ class DesktopWidget(QMainWindow):
 
     def _update_fps_display(self):
         """1초 타이머 — 실측 FPS 계산 및 상태바 갱신"""
-        self._current_fps = self._frame_count
-        self._frame_count = 0
+        self._current_fps = self._fps_frame_count
+        self._fps_frame_count = 0
+
+        # FPS 색상: 높을수록 초록, 낮을수록 빨강
+        if self._current_fps >= 20:
+            fps_color = "#4CAF50"
+        elif self._current_fps >= 10:
+            fps_color = "#FFD600"
+        elif self._current_fps >= 1:
+            fps_color = "#FFA726"
+        else:
+            fps_color = "#F44336"
         self._fps_label.setText(f"{self._current_fps} FPS")
+        self._fps_label.setStyleSheet(
+            f"color: {fps_color}; padding: 0 6px; font-size: 11px; font-weight: bold;"
+        )
+
+        # 스트림 요청 후 5초 이상 프레임이 없으면 경고
+        if (self._conn_state == 'waiting' and self._total_frame_count == 0
+                and time.time() - self._stream_start_time > 5):
+            elapsed = time.time() - self._stream_start_time
+            self._screen.set_overlay_text(
+                f'⏳ 프레임 대기 중... ({elapsed:.0f}초)', '#FFA726'
+            )
 
     # ==================== 화질/FPS 조절 (v2.0.1) ====================
 
@@ -744,18 +878,21 @@ class DesktopWidget(QMainWindow):
             self._h264_decoder = None
 
         # 시그널 해제
-        try:
-            self._server.screen_frame_received.disconnect(self._on_frame_received)
-        except TypeError:
-            pass
-        try:
-            self._server.h264_frame_received.disconnect(self._on_h264_frame)
-        except TypeError:
-            pass
-        try:
-            self._server.stream_started.disconnect(self._on_stream_started)
-        except TypeError:
-            pass
+        for sig, slot in [
+            (self._server.screen_frame_received, self._on_frame_received),
+            (self._server.h264_frame_received, self._on_h264_frame),
+            (self._server.stream_started, self._on_stream_started),
+            (self._server.agent_disconnected, self._on_agent_disconnected),
+        ]:
+            try:
+                sig.disconnect(slot)
+            except TypeError:
+                pass
+
+        logger.info(
+            f"[{self._pc.name}] 뷰어 닫힘 — 총 프레임: {self._total_frame_count}, "
+            f"마지막 FPS: {self._current_fps}"
+        )
 
         self.closed.emit(self._pc.name)
         event.accept()
