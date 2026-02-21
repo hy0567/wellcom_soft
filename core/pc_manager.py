@@ -77,8 +77,12 @@ class PCManager:
         logger.info(f"DB에서 {len(self.pcs)}개 PC 로드")
 
     def load_from_server(self):
-        """서버 API에서 에이전트 목록을 가져와 로컬 PC 목록과 동기화"""
+        """서버 API에서 에이전트 목록을 가져와 로컬 PC 목록과 동기화
+
+        매니저 PC(현재 실행 중인 PC)는 에이전트 목록에서 제외.
+        """
         from api_client import api_client
+        import socket
 
         if not api_client.is_logged_in:
             logger.warning("서버 미로그인 — 서버 동기화 스킵")
@@ -90,6 +94,12 @@ class PCManager:
             logger.warning(f"서버 에이전트 목록 조회 실패: {e}")
             return
 
+        # 매니저 PC(현재 PC) 필터링: hostname 또는 agent_id가 현재 PC와 동일하면 제외
+        try:
+            my_hostname = socket.gethostname()
+        except Exception:
+            my_hostname = ''
+
         with self._lock:
             server_agent_ids = set()
 
@@ -97,6 +107,16 @@ class PCManager:
                 agent_id = agent_data.get('agent_id', '')
                 if not agent_id:
                     continue
+
+                # 매니저 PC 자신은 에이전트 목록에서 제외
+                agent_hostname = agent_data.get('hostname', '')
+                if my_hostname and (
+                    agent_id.upper() == my_hostname.upper()
+                    or agent_hostname.upper() == my_hostname.upper()
+                ):
+                    logger.debug(f"매니저 PC 제외: {agent_id} (hostname={agent_hostname})")
+                    continue
+
                 server_agent_ids.add(agent_id)
 
                 # display_name 또는 hostname을 PC 이름으로 사용
@@ -283,6 +303,16 @@ class PCManager:
 
     def _on_agent_connected(self, agent_id: str, ip: str):
         """에이전트 연결 → PC 상태 ONLINE"""
+        # 매니저 PC 자신이면 무시
+        import socket
+        try:
+            my_hostname = socket.gethostname()
+            if my_hostname and agent_id.upper() == my_hostname.upper():
+                logger.debug(f"매니저 PC 연결 알림 무시: {agent_id}")
+                return
+        except Exception:
+            pass
+
         pc = self.get_pc_by_agent_id(agent_id)
 
         if not pc:
