@@ -224,6 +224,15 @@ class DesktopWidget(QMainWindow):
         # 스트리밍 시작 (v2.0.2: H.264 코덱 협상)
         preferred_codec = settings.get('screen.stream_codec', 'h264')
         keyframe_interval = settings.get('screen.keyframe_interval', 60)
+
+        # H.264 디코더 사용 가능 여부 미리 확인 — 불가 시 MJPEG으로 바로 요청
+        if preferred_codec == 'h264':
+            test_decoder = H264Decoder()
+            if not test_decoder.is_available:
+                logger.info(f"[{pc.name}] H.264 디코더 미지원 — MJPEG으로 요청")
+                preferred_codec = 'mjpeg'
+            test_decoder.close()
+
         self._server.start_streaming(
             pc.agent_id,
             fps=self._current_target_fps,
@@ -384,15 +393,28 @@ class DesktopWidget(QMainWindow):
                 self._codec_label.setText(f"H.264 ({encoder})")
             else:
                 logger.warning(
-                    f"[{self._pc.name}] H.264 디코더 불가 — MJPEG 프레임만 표시"
+                    f"[{self._pc.name}] H.264 디코더 불가 — MJPEG으로 재시작"
                 )
                 self._h264_decoder = None
                 self._stream_codec = 'mjpeg'
                 self._codec_label.setText("MJPEG")
+                # 에이전트에 MJPEG으로 재시작 요청
+                self._server.stop_streaming(self._pc.agent_id)
+                QTimer.singleShot(200, self._restart_as_mjpeg)
         else:
             self._h264_decoder = None
             logger.info(f"[{self._pc.name}] MJPEG 스트리밍")
             self._codec_label.setText("MJPEG")
+
+    def _restart_as_mjpeg(self):
+        """H.264 불가 시 MJPEG으로 스트리밍 재시작"""
+        logger.info(f"[{self._pc.name}] MJPEG으로 스트리밍 재시작")
+        self._server.start_streaming(
+            self._pc.agent_id,
+            fps=self._current_target_fps,
+            quality=self._current_quality,
+            codec='mjpeg',
+        )
 
     # ==================== H.264 프레임 수신 (v2.0.2) ====================
 
