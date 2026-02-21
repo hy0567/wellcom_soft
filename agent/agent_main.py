@@ -344,7 +344,11 @@ class WellcomAgent:
         # 서버 로그인 (API URL이 설정된 경우)
         if self.config.api_url:
             if not self._server_login():
-                logger.warning("서버 로그인 실패 — WebSocket 직접 연결 모드로 전환")
+                logger.warning("서버 로그인 실패 — 설정 UI로 전환")
+                # 서버 로그인 실패 시 설정 UI 열기
+                result = self._ask_server_ip()
+                if not result:
+                    return
             else:
                 self._register_self()
 
@@ -353,16 +357,14 @@ class WellcomAgent:
                     target=self._heartbeat_loop, daemon=True, name='Heartbeat'
                 )
                 self._heartbeat_thread.start()
-
-        # 매니저 WebSocket 연결을 위한 IP 확인
-        if not self.config.server_ip:
-            ip = self._ask_server_ip()
-            if not ip:
+        else:
+            # API URL이 없으면 설정 UI 열기
+            result = self._ask_server_ip()
+            if not result:
                 return
-            self.config.set('server_ip', ip)
 
         logger.info("WellcomSOFT Agent 시작")
-        logger.info(f"관리PC: {self.config.server_ip}:{self.config.server_port}")
+        logger.info(f"서버 API: {self.config.api_url}")
 
         # 클립보드 감시
         if self.config.clipboard_sync:
@@ -374,7 +376,7 @@ class WellcomAgent:
         )
         self._tray_thread.start()
 
-        # WebSocket 클라이언트
+        # WebSocket 클라이언트 (서버 릴레이 접속)
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
@@ -389,12 +391,20 @@ class WellcomAgent:
             self.screen_capture.close()
 
     async def _run_client(self):
-        """관리PC WebSocket 서버에 연결 (자동 재연결)"""
-        uri = f"ws://{self.config.server_ip}:{self.config.server_port}"
+        """서버 WS 릴레이에 접속 (자동 재연결)
+
+        서버의 /ws/agent?token=JWT 엔드포인트에 접속하여
+        서버가 매니저와 메시지를 중계한다.
+        """
+        # WS URL 구성: http → ws 변환
+        api_url = self.config.api_url or ''
+        ws_base = api_url.replace('https://', 'wss://').replace('http://', 'ws://')
+        token = self.api_client._token if self.api_client else ''
+        uri = f"{ws_base}/ws/agent?token={token}"
 
         while self._running:
             try:
-                logger.info(f"관리PC에 연결 시도: {uri}")
+                logger.info(f"서버 WS 릴레이 접속 시도: {ws_base}/ws/agent")
                 async with websockets.connect(
                     uri,
                     max_size=50 * 1024 * 1024,
@@ -403,7 +413,7 @@ class WellcomAgent:
                 ) as ws:
                     self._ws = ws
 
-                    # 인증
+                    # 인증 (서버가 매니저에 전달)
                     sys_info = self._get_system_info()
                     screen_w, screen_h = self.screen_capture.screen_size
                     await ws.send(json.dumps({
@@ -422,7 +432,7 @@ class WellcomAgent:
                         await asyncio.sleep(5)
                         continue
 
-                    logger.info("관리PC 연결 성공!")
+                    logger.info("서버 WS 릴레이 접속 성공! (매니저와 중계)")
 
                     # 메시지 수신 루프
                     async for message in ws:
@@ -434,7 +444,7 @@ class WellcomAgent:
                             await self._handle_binary(ws, message)
 
             except websockets.exceptions.ConnectionClosed:
-                logger.info("관리PC 연결 종료")
+                logger.info("서버 WS 연결 종료")
             except Exception as e:
                 err_msg = str(e) or type(e).__name__
                 logger.warning(f"연결 오류: {err_msg}")
@@ -681,9 +691,8 @@ class WellcomAgent:
             def on_show_info(icon, item):
                 status = "연결됨" if self._ws else "연결 대기"
                 streaming = " [스트리밍]" if self._streaming else ""
-                server_info = f"서버: {self.config.server_ip}:{self.config.server_port}"
-                api_info = f" | API: {self.config.api_url}" if self.config.api_url else ""
-                logger.info(f"{server_info}{api_info}, 상태: {status}{streaming}")
+                server_info = f"서버: {self.config.api_url}" if self.config.api_url else "서버: 미설정"
+                logger.info(f"{server_info}, 상태: {status}{streaming}")
 
             menu = pystray.Menu(
                 pystray.MenuItem(
