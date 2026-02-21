@@ -85,7 +85,7 @@ class PCThumbnailWidget(QFrame):
             )
             self.image_label.setPixmap(scaled)
 
-    def set_status(self, status: PCStatus):
+    def set_status(self, status: PCStatus, last_seen: str = ''):
         self._status = status
         self._is_online = (status == PCStatus.ONLINE)
         self._update_style()
@@ -93,8 +93,14 @@ class PCThumbnailWidget(QFrame):
             self.image_label.clear()
             if status == PCStatus.ERROR:
                 self.image_label.setText("오류")
+            elif status == PCStatus.CONNECTING:
+                self.image_label.setText("연결 중...")
             else:
-                self.image_label.setText("오프라인")
+                # 오프라인 — last_seen 시간 표시
+                if last_seen:
+                    self.image_label.setText(f"오프라인\n{last_seen}")
+                else:
+                    self.image_label.setText("오프라인")
 
     def set_selected(self, selected: bool):
         self._is_selected = selected
@@ -110,6 +116,9 @@ class PCThumbnailWidget(QFrame):
             border_width = 3
         elif self._status == PCStatus.ONLINE:
             border_color = '#4CAF50'
+            border_width = 2
+        elif self._status == PCStatus.CONNECTING:
+            border_color = '#FFA726'
             border_width = 2
         elif self._status == PCStatus.ERROR:
             border_color = '#f44336'
@@ -213,7 +222,7 @@ class GridView(QScrollArea):
 
             memo = getattr(pc.info, 'memo', '')
             thumb = PCThumbnailWidget(pc.name, memo)
-            thumb.set_status(pc.status)
+            thumb.set_status(pc.status, getattr(pc, 'last_seen_str', ''))
             thumb.double_clicked.connect(self.open_viewer.emit)
             thumb.right_clicked.connect(self.context_menu_requested.emit)
             thumb.selected.connect(self._on_pc_selected)
@@ -242,7 +251,7 @@ class GridView(QScrollArea):
         thumb = self._thumbnails.get(pc_name)
         pc = self.pc_manager.get_pc(pc_name)
         if thumb and pc:
-            thumb.set_status(pc.status)
+            thumb.set_status(pc.status, getattr(pc, 'last_seen_str', ''))
 
     def _on_thumbnail_received(self, agent_id: str, jpeg_data: bytes):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)

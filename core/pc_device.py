@@ -38,6 +38,8 @@ class PCDevice:
         self.info = info
         self.status = PCStatus.OFFLINE
         self.last_seen: float = 0.0
+        self.last_seen_str: str = ''      # 서버 last_seen (표시용)
+        self.server_online: bool = False   # 서버 API가 보고한 온라인 상태
         self.last_thumbnail: Optional[bytes] = None
         self.thumbnail_time: float = 0.0
         self.is_streaming: bool = False

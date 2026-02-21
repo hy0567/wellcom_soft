@@ -4,6 +4,7 @@
 """
 
 import re
+import socket
 import threading
 import logging
 from typing import Dict, List, Optional
@@ -15,6 +16,14 @@ from core.database import Database
 from core.agent_server import AgentServer
 
 logger = logging.getLogger(__name__)
+
+
+def _get_my_hostname() -> str:
+    """현재 PC(매니저)의 hostname (대문자)"""
+    try:
+        return socket.gethostname().upper()
+    except Exception:
+        return ''
 
 
 def _natural_sort_key(text: str):
@@ -42,6 +51,7 @@ class PCManager:
         self.agent_server = agent_server
         self.signals = DeviceSignals()
         self._lock = threading.RLock()
+        self._my_hostname = _get_my_hostname()  # 매니저 PC hostname 캐시
 
         # 에이전트 서버 시그널 연결
         agent_server.agent_connected.connect(self._on_agent_connected)
@@ -50,18 +60,38 @@ class PCManager:
 
     # ==================== PC 관리 ====================
 
+    def _is_manager_pc(self, agent_id: str, hostname: str = '') -> bool:
+        """매니저 PC(현재 PC)인지 확인"""
+        if not self._my_hostname:
+            return False
+        return (
+            agent_id.upper() == self._my_hostname
+            or (hostname and hostname.upper() == self._my_hostname)
+        )
+
     def load_from_db(self):
-        """DB에서 PC 목록 로드"""
+        """DB에서 PC 목록 로드 (매니저 PC 제외)"""
+        skipped = 0
+        manager_db_ids = []  # DB에서 삭제할 매니저 PC id
         with self._lock:
             self.pcs.clear()
             for row in self.db.get_all_pcs():
+                agent_id = row.get('agent_id', '')
+                hostname = row.get('hostname', '')
+
+                # 매니저 PC는 제외 + DB에서도 삭제
+                if self._is_manager_pc(agent_id, hostname):
+                    skipped += 1
+                    manager_db_ids.append(row['id'])
+                    continue
+
                 info = PCInfo(
                     name=row['name'],
-                    agent_id=row['agent_id'],
+                    agent_id=agent_id,
                     ip=row.get('ip', ''),
                     group=row.get('group_name', 'default'),
                     os_info=row.get('os_info', ''),
-                    hostname=row.get('hostname', ''),
+                    hostname=hostname,
                     mac_address=row.get('mac_address', ''),
                     screen_width=row.get('screen_width', 1920),
                     screen_height=row.get('screen_height', 1080),
@@ -73,8 +103,17 @@ class PCManager:
                 pc = PCDevice(info)
                 self.pcs[row['name']] = pc
 
+        # 매니저 PC 레코드를 DB에서도 삭제
+        for db_id in manager_db_ids:
+            try:
+                self.db.delete_pc(db_id)
+                logger.info(f"매니저 PC 레코드 DB에서 삭제: id={db_id}")
+            except Exception as e:
+                logger.warning(f"매니저 PC DB 삭제 실패: {e}")
+
         self.signals.devices_reloaded.emit()
-        logger.info(f"DB에서 {len(self.pcs)}개 PC 로드")
+        logger.info(f"DB에서 {len(self.pcs)}개 PC 로드" +
+                     (f" (매니저 PC {skipped}개 제외/삭제)" if skipped else ""))
 
     def load_from_server(self):
         """서버 API에서 에이전트 목록을 가져와 로컬 PC 목록과 동기화
@@ -82,7 +121,6 @@ class PCManager:
         매니저 PC(현재 실행 중인 PC)는 에이전트 목록에서 제외.
         """
         from api_client import api_client
-        import socket
 
         if not api_client.is_logged_in:
             logger.warning("서버 미로그인 — 서버 동기화 스킵")
@@ -94,12 +132,6 @@ class PCManager:
             logger.warning(f"서버 에이전트 목록 조회 실패: {e}")
             return
 
-        # 매니저 PC(현재 PC) 필터링: hostname 또는 agent_id가 현재 PC와 동일하면 제외
-        try:
-            my_hostname = socket.gethostname()
-        except Exception:
-            my_hostname = ''
-
         with self._lock:
             server_agent_ids = set()
 
@@ -110,10 +142,7 @@ class PCManager:
 
                 # 매니저 PC 자신은 에이전트 목록에서 제외
                 agent_hostname = agent_data.get('hostname', '')
-                if my_hostname and (
-                    agent_id.upper() == my_hostname.upper()
-                    or agent_hostname.upper() == my_hostname.upper()
-                ):
+                if self._is_manager_pc(agent_id, agent_hostname):
                     logger.debug(f"매니저 PC 제외: {agent_id} (hostname={agent_hostname})")
                     continue
 
@@ -132,6 +161,9 @@ class PCManager:
                     counter += 1
 
                 existing_pc = self.get_pc_by_agent_id(agent_id)
+                srv_online = agent_data.get('is_online', False)
+                srv_last_seen = agent_data.get('last_seen', '')
+
                 if existing_pc:
                     # 기존 PC 정보 업데이트
                     existing_pc.update_info(
@@ -143,8 +175,10 @@ class PCManager:
                         screen_height=agent_data.get('screen_height', 1080),
                     )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
-                    # 서버의 is_online 상태 반영 (WebSocket 미연결 시)
-                    if agent_data.get('is_online') and not existing_pc.is_online:
+                    existing_pc.server_online = srv_online
+                    existing_pc.last_seen_str = srv_last_seen
+                    # 서버에서 online인데 WS 미연결이면 CONNECTING 상태로 표시
+                    if srv_online and not existing_pc.is_online:
                         existing_pc.status = PCStatus.CONNECTING
                 else:
                     # 새 PC 추가 (DB에도 저장)
@@ -160,6 +194,10 @@ class PCManager:
                         screen_height=agent_data.get('screen_height', 1080),
                     )
                     pc = PCDevice(info)
+                    pc.server_online = srv_online
+                    pc.last_seen_str = srv_last_seen
+                    if srv_online:
+                        pc.status = PCStatus.CONNECTING
                     self.pcs[name] = pc
 
                     # 로컬 DB에도 저장
@@ -304,14 +342,9 @@ class PCManager:
     def _on_agent_connected(self, agent_id: str, ip: str):
         """에이전트 연결 → PC 상태 ONLINE"""
         # 매니저 PC 자신이면 무시
-        import socket
-        try:
-            my_hostname = socket.gethostname()
-            if my_hostname and agent_id.upper() == my_hostname.upper():
-                logger.debug(f"매니저 PC 연결 알림 무시: {agent_id}")
-                return
-        except Exception:
-            pass
+        if self._is_manager_pc(agent_id):
+            logger.debug(f"매니저 PC 연결 알림 무시: {agent_id}")
+            return
 
         pc = self.get_pc_by_agent_id(agent_id)
 
