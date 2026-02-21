@@ -884,9 +884,11 @@ def main():
         uninstall_startup()
         return
 
-    # 업데이트 확인 (업데이트 적용 시 재시작)
-    if not check_agent_update():
-        return
+    # 자동 업데이트는 런처(agent_launcher.py)에서 app/ 로드 전에 실행됨.
+    # 개발 환경(런처 없이 직접 실행)에서만 여기서 체크.
+    if not os.environ.get('WELLCOMAGENT_BASE_DIR'):
+        if not check_agent_update():
+            return
 
     agent = WellcomAgent()
     agent.start()

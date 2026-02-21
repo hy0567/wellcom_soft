@@ -3,18 +3,28 @@ WellcomAgent 런처
 - PyInstaller EXE의 엔트리포인트
 - 고정 설치 경로: C:\\WellcomAgent
 - EXE 위치에 관계없이 항상 C:\\WellcomAgent에서 실행
+- app/ 로드 **전에** GitHub에서 자동 업데이트 확인/적용
 - app/ 폴더의 코드를 동적 로드하여 실행
 - Pending update 처리 (파일 잠금 대응)
 """
 
 import sys
 import os
+import json
 import shutil
+import hashlib
 import logging
 import ctypes
+import zipfile
 from pathlib import Path
 
-LAUNCHER_VERSION = "1.0.0"
+LAUNCHER_VERSION = "2.0.0"
+
+# ───────────────────────────────────────────
+# 에이전트 업데이트 설정 (런처에 하드코딩)
+# ───────────────────────────────────────────
+GITHUB_REPO = "hy0567/wellcom_soft"
+ASSET_NAME = "agent.zip"
 
 # ───────────────────────────────────────────
 # 경로 설정
@@ -168,6 +178,262 @@ def apply_pending_update():
 
 
 # ───────────────────────────────────────────
+# 자동 업데이트 (app/ 로드 전에 실행)
+# ───────────────────────────────────────────
+def _get_installed_version() -> str:
+    """현재 설치된 에이전트 버전 읽기
+
+    우선순위:
+    1. app/version.json (업데이트 후 생성)
+    2. app/version.py (__version__ 파싱)
+    3. "0.0.0" (최초 설치)
+    """
+    # 1) version.json
+    vj = APP_DIR / "version.json"
+    try:
+        if vj.exists():
+            data = json.loads(vj.read_text(encoding='utf-8'))
+            return data.get("version", "0.0.0")
+    except Exception:
+        pass
+
+    # 2) version.py
+    vp = APP_DIR / "version.py"
+    try:
+        if vp.exists():
+            for line in vp.read_text(encoding='utf-8').splitlines():
+                if line.startswith('__version__'):
+                    return line.split('=', 1)[1].strip().strip('"\'')
+    except Exception:
+        pass
+
+    return "0.0.0"
+
+
+def _compare_versions(current: str, latest: str) -> bool:
+    """latest > current 이면 True"""
+    try:
+        def parse(v):
+            return tuple(int(x) for x in v.split('.'))
+        return parse(latest) > parse(current)
+    except Exception:
+        return latest != current
+
+
+def check_and_apply_update():
+    """GitHub Release에서 최신 agent.zip 확인 → 다운로드 → app/ 교체
+
+    app/ 로드 **전에** 실행되므로, updater 모듈에 의존하지 않고
+    런처 자체에 경량 HTTP 로직을 내장.
+
+    실패해도 기존 app/로 정상 실행 (업데이트는 최선 노력).
+    """
+    logger = logging.getLogger('AgentLauncher')
+
+    # app/ 디렉터리가 없으면 아직 최초 설치 전 → 스킵
+    if not APP_DIR.exists():
+        return
+
+    try:
+        import requests
+    except ImportError:
+        # PyInstaller 빌드에서 requests가 없을 수 있음 → urllib 폴백
+        try:
+            import urllib.request
+            import ssl
+            _HAS_REQUESTS = False
+        except ImportError:
+            logger.debug("HTTP 라이브러리 없음 — 업데이트 스킵")
+            return
+    else:
+        _HAS_REQUESTS = True
+
+    current_version = _get_installed_version()
+    logger.info(f"현재 에이전트 버전: v{current_version}")
+
+    # ── 1) GitHub API에서 최신 릴리스 조회 ──
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    headers = {"Accept": "application/vnd.github+json"}
+
+    try:
+        if _HAS_REQUESTS:
+            resp = requests.get(api_url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logger.debug(f"GitHub API 응답: {resp.status_code}")
+                return
+            data = resp.json()
+        else:
+            req = urllib.request.Request(api_url, headers=headers)
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        logger.debug(f"업데이트 확인 실패 (네트워크): {e}")
+        return
+
+    latest_version = data.get("tag_name", "").lstrip("v")
+    if not latest_version:
+        return
+
+    if not _compare_versions(current_version, latest_version):
+        logger.info(f"최신 버전 사용 중: v{current_version}")
+        return
+
+    logger.info(f"업데이트 발견: v{current_version} -> v{latest_version}")
+
+    # ── 2) agent.zip 다운로드 URL 찾기 ──
+    download_url = None
+    for asset in data.get("assets", []):
+        if asset["name"] == ASSET_NAME:
+            download_url = asset["browser_download_url"]
+            break
+
+    if not download_url:
+        logger.warning(f"릴리스에 {ASSET_NAME} 에셋 없음")
+        return
+
+    # ── 3) 릴리스 노트에서 SHA256 체크섬 파싱 ──
+    expected_checksum = ""
+    body = data.get("body", "")
+    for line in body.split('\n'):
+        if f'SHA256({ASSET_NAME})' in line and ':' in line:
+            expected_checksum = line.split(':', 1)[1].strip()
+            break
+        elif 'SHA256' in line.upper() and '(' not in line and ':' in line:
+            expected_checksum = line.split(':')[-1].strip()
+            break
+
+    # ── 4) 다운로드 ──
+    TEMP_DIR.mkdir(exist_ok=True)
+    zip_path = TEMP_DIR / ASSET_NAME
+
+    try:
+        logger.info(f"다운로드 중: {ASSET_NAME} (v{latest_version})")
+        if _HAS_REQUESTS:
+            resp = requests.get(download_url, stream=True, timeout=60)
+            resp.raise_for_status()
+            with open(zip_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        else:
+            req = urllib.request.Request(download_url)
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                with open(zip_path, 'wb') as f:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+
+        logger.info(f"다운로드 완료: {zip_path} ({zip_path.stat().st_size} bytes)")
+    except Exception as e:
+        logger.warning(f"다운로드 실패: {e}")
+        _cleanup_temp(zip_path)
+        return
+
+    # ── 5) 체크섬 검증 ──
+    if expected_checksum:
+        sha256 = hashlib.sha256()
+        with open(zip_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                sha256.update(chunk)
+        actual = sha256.hexdigest()
+        if actual != expected_checksum:
+            logger.error(f"체크섬 불일치! expected={expected_checksum[:16]}... actual={actual[:16]}...")
+            _cleanup_temp(zip_path)
+            return
+        logger.info("체크섬 검증 통과")
+
+    # ── 6) ZIP 유효성 확인 ──
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            names = zf.namelist()
+            if not names:
+                logger.error("빈 ZIP 파일")
+                _cleanup_temp(zip_path)
+                return
+    except zipfile.BadZipFile:
+        logger.error("손상된 ZIP 파일")
+        _cleanup_temp(zip_path)
+        return
+
+    # ── 7) 현재 app/ 백업 ──
+    try:
+        BACKUP_DIR.mkdir(exist_ok=True)
+        backup_path = BACKUP_DIR / f"app_v{current_version}.zip"
+        if APP_DIR.exists():
+            with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for fp in APP_DIR.rglob('*'):
+                    if fp.is_file() and '__pycache__' not in str(fp):
+                        zf.write(fp, fp.relative_to(APP_DIR))
+            logger.info(f"백업 생성: {backup_path.name}")
+    except Exception as e:
+        logger.warning(f"백업 생성 실패 (계속 진행): {e}")
+
+    # ── 8) app/ 교체 ──
+    try:
+        if APP_DIR.exists():
+            shutil.rmtree(APP_DIR, ignore_errors=True)
+        APP_DIR.mkdir(exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(APP_DIR)
+
+        # version.json 생성
+        version_data = {
+            "version": latest_version,
+            "checksum": expected_checksum,
+            "updated_at": data.get("published_at", ""),
+        }
+        (APP_DIR / "version.json").write_text(
+            json.dumps(version_data, indent=2, ensure_ascii=False),
+            encoding='utf-8'
+        )
+
+        logger.info(f"업데이트 적용 완료: v{current_version} -> v{latest_version}")
+    except Exception as e:
+        logger.error(f"업데이트 적용 실패: {e}")
+        # 롤백 시도
+        try:
+            backup_path = BACKUP_DIR / f"app_v{current_version}.zip"
+            if backup_path.exists():
+                if APP_DIR.exists():
+                    shutil.rmtree(APP_DIR, ignore_errors=True)
+                APP_DIR.mkdir(exist_ok=True)
+                with zipfile.ZipFile(backup_path, 'r') as zf:
+                    zf.extractall(APP_DIR)
+                logger.info("롤백 완료")
+        except Exception as e2:
+            logger.error(f"롤백도 실패: {e2}")
+    finally:
+        _cleanup_temp(zip_path)
+
+    # 오래된 백업 정리 (최대 3개)
+    try:
+        backups = sorted(
+            BACKUP_DIR.glob("app_v*.zip"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+        for old in backups[3:]:
+            old.unlink()
+    except Exception:
+        pass
+
+
+def _cleanup_temp(zip_path: Path):
+    """temp/ 정리"""
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
+        if TEMP_DIR.exists() and not any(TEMP_DIR.iterdir()):
+            TEMP_DIR.rmdir()
+    except Exception:
+        pass
+
+
+# ───────────────────────────────────────────
 # App 초기화
 # ───────────────────────────────────────────
 def ensure_app_dir():
@@ -275,7 +541,13 @@ def main():
     # 4. app/ 디렉터리 확인 (최초 실행 시 복사)
     ensure_app_dir()
 
-    # 5. 앱 실행
+    # 5. 자동 업데이트 (app/ 로드 전에 실행)
+    try:
+        check_and_apply_update()
+    except Exception as e:
+        logger.warning(f"자동 업데이트 확인 실패 (무시): {e}")
+
+    # 6. 앱 실행
     try:
         load_and_run_app()
     except Exception as e:
