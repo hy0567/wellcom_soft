@@ -72,6 +72,10 @@ def setup_logging():
     console=False EXE에서는 sys.stdout/stderr가 None이므로:
     - LogTee로 파일 출력을 보장 (콘솔은 None이면 스킵)
     - StreamHandler 대신 FileHandler 사용 (stdout이 None일 때)
+
+    중요: launcher.py(구버전 EXE)가 이미 root logger에 StreamHandler(None)를
+    등록했을 수 있으므로, 기존 핸들러를 모두 제거하고 안전한 핸들러만 등록.
+    (logging.basicConfig는 핸들러가 이미 있으면 무시되므로 force=True 사용)
     """
     log_path = os.path.join(LOG_DIR, "app.log")
 
@@ -94,20 +98,29 @@ def setup_logging():
         sys.stdout = LogTee(log_path, sys.stdout)
         sys.stderr = LogTee(log_path, sys.stderr)
 
-    # 로깅 핸들러 설정
+    # ★ 기존 핸들러 모두 제거 (구버전 런처가 등록한 깨진 StreamHandler 포함)
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        try:
+            h.close()
+        except Exception:
+            pass
+        root.removeHandler(h)
+
+    # 안전한 핸들러만 등록
     handlers = []
 
-    # stdout이 유효할 때만 StreamHandler 추가
-    if sys.stdout is not None and hasattr(sys.stdout, 'write'):
-        handlers.append(logging.StreamHandler(sys.stdout))
-
-    # FileHandler도 추가 (이중 안전)
+    # FileHandler (항상 추가 — 핵심 로그 출력)
     try:
         handlers.append(
             logging.FileHandler(log_path, encoding='utf-8')
         )
     except Exception:
         pass
+
+    # stdout이 유효할 때만 StreamHandler 추가
+    if sys.stdout is not None and hasattr(sys.stdout, 'write'):
+        handlers.append(logging.StreamHandler(sys.stdout))
 
     # 핸들러가 하나도 없으면 NullHandler라도 추가
     if not handlers:
