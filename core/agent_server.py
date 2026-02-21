@@ -150,6 +150,18 @@ class AgentServer(QObject):
     def stop_streaming(self, agent_id: str):
         self._send_to_agent(agent_id, {'type': 'stop_stream'})
 
+    def update_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
+        """스트리밍 중 화질/FPS 실시간 변경 (v2.0.1)"""
+        self._send_to_agent(agent_id, {
+            'type': 'update_stream', 'fps': fps, 'quality': quality,
+        })
+
+    def send_special_key(self, agent_id: str, key_combo: str):
+        """특수키 전송: ctrl_alt_del, alt_tab, win (v2.0.1)"""
+        self._send_to_agent(agent_id, {
+            'type': 'special_key', 'combo': key_combo,
+        })
+
     def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
         self._send_to_agent(agent_id, {
             'type': 'start_thumbnail_push', 'interval': interval,

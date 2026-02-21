@@ -2,18 +2,21 @@
 
 LinkIO Desktop의 DesktopWidget 재현.
 탭이 아닌 독립 QMainWindow로 열리며, 전체화면/사이드메뉴/단축키를 지원.
+
+v2.0.1: 상태바(FPS/해상도/화질), 화질/FPS 조절, 특수키, 화면 비율 토글
 """
 
 import logging
 import os
+import time
 from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QFileDialog, QInputDialog,
-    QMessageBox, QApplication,
+    QMessageBox, QApplication, QStatusBar, QLabel,
 )
 from PyQt6.QtCore import Qt, QByteArray, pyqtSignal, QTimer
-from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent
+from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent, QFont
 
 from config import settings
 from core.pc_device import PCDevice
@@ -45,16 +48,26 @@ _QT_KEY_MAP = {
 
 
 class RemoteScreenWidget(QWidget):
-    """원격 화면 렌더링 위젯 (최적화)"""
+    """원격 화면 렌더링 위젯 (최적화)
+
+    v2.0.1: Fit/Stretch 화면 비율 토글 지원
+    """
+
+    # 화면 비율 모드
+    MODE_FIT = 'fit'          # 비율 유지 (레터박스)
+    MODE_STRETCH = 'stretch'  # 창에 맞춤 (비율 무시)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap = QPixmap()
         self._scaled_pixmap = QPixmap()  # 스케일 캐시
         self._scale = 1.0
+        self._scale_x = 1.0   # Stretch 모드용 X 스케일
+        self._scale_y = 1.0   # Stretch 모드용 Y 스케일
         self._offset_x = 0
         self._offset_y = 0
         self._last_widget_size = (0, 0)
+        self._aspect_mode = self.MODE_FIT
         self.setMinimumSize(640, 480)
         self.setStyleSheet("background-color: #000;")
 
@@ -64,6 +77,17 @@ class RemoteScreenWidget(QWidget):
     @property
     def current_pixmap(self) -> QPixmap:
         return self._pixmap
+
+    @property
+    def aspect_mode(self) -> str:
+        return self._aspect_mode
+
+    def set_aspect_mode(self, mode: str):
+        """화면 비율 모드 변경"""
+        if mode in (self.MODE_FIT, self.MODE_STRETCH):
+            self._aspect_mode = mode
+            self._rebuild_scaled()
+            self.update()
 
     def update_frame(self, jpeg_data: bytes):
         """JPEG 프레임 업데이트"""
@@ -77,28 +101,56 @@ class RemoteScreenWidget(QWidget):
             return
         pw, ph = self._pixmap.width(), self._pixmap.height()
         ww, wh = self.width(), self.height()
-        if ww <= 0 or wh <= 0:
+        if ww <= 0 or wh <= 0 or pw <= 0 or ph <= 0:
             return
-        self._scale = min(ww / pw, wh / ph)
-        scaled_w = int(pw * self._scale)
-        scaled_h = int(ph * self._scale)
-        self._offset_x = (ww - scaled_w) // 2
-        self._offset_y = (wh - scaled_h) // 2
 
-        # FastTransformation → 빠른 렌더링 (부드러움 우선)
-        self._scaled_pixmap = self._pixmap.scaled(
-            ww, wh,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
+        if self._aspect_mode == self.MODE_STRETCH:
+            # Stretch: 비율 무시, 창 전체에 맞춤
+            self._scale_x = ww / pw
+            self._scale_y = wh / ph
+            self._scale = min(self._scale_x, self._scale_y)  # 참고용
+            self._offset_x = 0
+            self._offset_y = 0
+            self._scaled_pixmap = self._pixmap.scaled(
+                ww, wh,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        else:
+            # Fit: 비율 유지 (레터박스)
+            self._scale = min(ww / pw, wh / ph)
+            scaled_w = int(pw * self._scale)
+            scaled_h = int(ph * self._scale)
+            self._offset_x = (ww - scaled_w) // 2
+            self._offset_y = (wh - scaled_h) // 2
+            self._scale_x = self._scale
+            self._scale_y = self._scale
+            self._scaled_pixmap = self._pixmap.scaled(
+                ww, wh,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+
         self._last_widget_size = (ww, wh)
 
     def map_to_remote(self, local_x: int, local_y: int, screen_w: int, screen_h: int):
         """로컬 좌표 → 원격 좌표"""
-        if self._pixmap.isNull() or self._scale == 0:
+        if self._pixmap.isNull():
             return 0, 0
-        rx = int((local_x - self._offset_x) / self._scale)
-        ry = int((local_y - self._offset_y) / self._scale)
+
+        if self._aspect_mode == self.MODE_STRETCH:
+            # Stretch: 독립 스케일
+            if self._scale_x == 0 or self._scale_y == 0:
+                return 0, 0
+            rx = int(local_x / self._scale_x)
+            ry = int(local_y / self._scale_y)
+        else:
+            # Fit: 오프셋 + 단일 스케일
+            if self._scale == 0:
+                return 0, 0
+            rx = int((local_x - self._offset_x) / self._scale)
+            ry = int((local_y - self._offset_y) / self._scale)
+
         return max(0, min(rx, screen_w - 1)), max(0, min(ry, screen_h - 1))
 
     def paintEvent(self, event):
@@ -117,7 +169,10 @@ class RemoteScreenWidget(QWidget):
 
 
 class DesktopWidget(QMainWindow):
-    """별도 창 원격 뷰어 (LinkIO DesktopWidget 재현)"""
+    """별도 창 원격 뷰어 (LinkIO DesktopWidget 재현)
+
+    v2.0.1: 상태바(FPS/해상도/화질), 화질/FPS 실시간 조절, 특수키, 화면 비율 토글
+    """
 
     # 시그널
     closed = pyqtSignal(str)                # pc_name
@@ -139,15 +194,27 @@ class DesktopWidget(QMainWindow):
         self._last_mouse_move_time = 0.0
         self._mouse_move_interval = 0.016  # ~60fps 마우스 이동 제한
 
+        # v2.0.1 — 상태 추적
+        self._frame_count = 0
+        self._current_fps = 0
+        self._current_quality = settings.get('screen.stream_quality', 60)
+        self._current_target_fps = settings.get('screen.stream_fps', 15)
+        self._is_stretch = False   # 화면 비율 모드
+
         self._init_ui()
         self._connect_signals()
         self._load_geometry()
 
+        # FPS 측정 타이머 (1초마다)
+        self._fps_timer = QTimer(self)
+        self._fps_timer.timeout.connect(self._update_fps_display)
+        self._fps_timer.start(1000)
+
         # 스트리밍 시작
         self._server.start_streaming(
             pc.agent_id,
-            fps=settings.get('screen.stream_fps', 15),
-            quality=settings.get('screen.stream_quality', 60),
+            fps=self._current_target_fps,
+            quality=self._current_quality,
         )
 
         # 팝업 스타일: 독립 창으로 최상위에 활성화
@@ -185,6 +252,16 @@ class DesktopWidget(QMainWindow):
         self._side_menu.command_clicked.connect(self._execute_command)
         self._side_menu.close_clicked.connect(self.close)
 
+        # v2.0.1 — 사이드 메뉴 새 버튼 연결
+        self._side_menu.quality_up_clicked.connect(lambda: self._adjust_quality(10))
+        self._side_menu.quality_down_clicked.connect(lambda: self._adjust_quality(-10))
+        self._side_menu.fps_up_clicked.connect(lambda: self._adjust_fps(5))
+        self._side_menu.fps_down_clicked.connect(lambda: self._adjust_fps(-5))
+        self._side_menu.ctrl_alt_del_clicked.connect(self._send_ctrl_alt_del)
+        self._side_menu.alt_tab_clicked.connect(self._send_alt_tab)
+        self._side_menu.win_key_clicked.connect(self._send_win_key)
+        self._side_menu.ratio_toggle_clicked.connect(self._toggle_aspect_ratio)
+
         if settings.get('desktop_widget.side_menu', True):
             layout.addWidget(self._side_menu)
         else:
@@ -192,6 +269,41 @@ class DesktopWidget(QMainWindow):
 
         # 키보드/마우스 이벤트를 screen 위젯에서 캡처
         self._screen.installEventFilter(self)
+
+        # v2.0.1 — 상태바
+        self._init_statusbar()
+
+    def _init_statusbar(self):
+        """상태바 초기화 — FPS/해상도/화질/비율 표시"""
+        sb = self.statusBar()
+        sb.setStyleSheet("""
+            QStatusBar {
+                background-color: #1e1e1e;
+                color: #aaa;
+                font-size: 11px;
+                border-top: 1px solid #3e3e3e;
+            }
+            QStatusBar::item { border: none; }
+        """)
+        sb.setFixedHeight(22)
+
+        label_style = "color: #aaa; padding: 0 6px; font-size: 11px;"
+
+        self._res_label = QLabel("-- x --")
+        self._res_label.setStyleSheet(label_style)
+        sb.addPermanentWidget(self._res_label)
+
+        self._fps_label = QLabel("0 FPS")
+        self._fps_label.setStyleSheet(label_style)
+        sb.addPermanentWidget(self._fps_label)
+
+        self._quality_label = QLabel(f"Q:{self._current_quality}")
+        self._quality_label.setStyleSheet(label_style)
+        sb.addPermanentWidget(self._quality_label)
+
+        self._ratio_label = QLabel("Fit")
+        self._ratio_label.setStyleSheet(label_style)
+        sb.addPermanentWidget(self._ratio_label)
 
     def _connect_signals(self):
         self._server.screen_frame_received.connect(self._on_frame_received)
@@ -223,6 +335,79 @@ class DesktopWidget(QMainWindow):
         if agent_id != self._pc.agent_id:
             return
         self._screen.update_frame(jpeg_data)
+        self._frame_count += 1
+
+        # 해상도 표시 갱신
+        pix = self._screen.current_pixmap
+        if not pix.isNull():
+            self._res_label.setText(f"{pix.width()} x {pix.height()}")
+
+    # ==================== FPS 표시 ====================
+
+    def _update_fps_display(self):
+        """1초 타이머 — 실측 FPS 계산 및 상태바 갱신"""
+        self._current_fps = self._frame_count
+        self._frame_count = 0
+        self._fps_label.setText(f"{self._current_fps} FPS")
+
+    # ==================== 화질/FPS 조절 (v2.0.1) ====================
+
+    def _adjust_quality(self, delta: int):
+        """화질 조절 (±10)"""
+        new_q = max(10, min(100, self._current_quality + delta))
+        if new_q == self._current_quality:
+            return
+        self._current_quality = new_q
+        self._quality_label.setText(f"Q:{new_q}")
+        self._server.update_streaming(
+            self._pc.agent_id,
+            fps=self._current_target_fps,
+            quality=self._current_quality,
+        )
+        logger.info(f"[{self._pc.name}] 화질 변경: {new_q}")
+
+    def _adjust_fps(self, delta: int):
+        """FPS 조절 (±5)"""
+        new_fps = max(1, min(60, self._current_target_fps + delta))
+        if new_fps == self._current_target_fps:
+            return
+        self._current_target_fps = new_fps
+        self._server.update_streaming(
+            self._pc.agent_id,
+            fps=self._current_target_fps,
+            quality=self._current_quality,
+        )
+        logger.info(f"[{self._pc.name}] FPS 변경: {new_fps}")
+
+    # ==================== 특수키 (v2.0.1) ====================
+
+    def _send_ctrl_alt_del(self):
+        """Ctrl+Alt+Del 전송"""
+        self._server.send_special_key(self._pc.agent_id, 'ctrl_alt_del')
+        logger.info(f"[{self._pc.name}] Ctrl+Alt+Del 전송")
+
+    def _send_alt_tab(self):
+        """Alt+Tab 전송"""
+        self._server.send_special_key(self._pc.agent_id, 'alt_tab')
+        logger.info(f"[{self._pc.name}] Alt+Tab 전송")
+
+    def _send_win_key(self):
+        """Windows 키 전송"""
+        self._server.send_special_key(self._pc.agent_id, 'win')
+        logger.info(f"[{self._pc.name}] Win 키 전송")
+
+    # ==================== 화면 비율 토글 (v2.0.1) ====================
+
+    def _toggle_aspect_ratio(self):
+        """Fit ↔ Stretch 토글"""
+        self._is_stretch = not self._is_stretch
+        if self._is_stretch:
+            self._screen.set_aspect_mode(RemoteScreenWidget.MODE_STRETCH)
+            self._ratio_label.setText("Stretch")
+        else:
+            self._screen.set_aspect_mode(RemoteScreenWidget.MODE_FIT)
+            self._ratio_label.setText("Fit")
+        logger.info(f"[{self._pc.name}] 비율: {self._screen.aspect_mode}")
 
     # ==================== 전체화면 ====================
 
@@ -233,10 +418,12 @@ class DesktopWidget(QMainWindow):
             if self._normal_geometry:
                 self.setGeometry(self._normal_geometry)
             self._side_menu.show()
+            self.statusBar().show()
         else:
             self._normal_geometry = self.geometry()
             self._is_fullscreen = True
             self._side_menu.hide()
+            self.statusBar().hide()
             self.showFullScreen()
 
     # ==================== 사이드 메뉴 액션 ====================
@@ -360,7 +547,6 @@ class DesktopWidget(QMainWindow):
 
     def _on_mouse_move(self, event: QMouseEvent):
         # 쓰로틀링: 너무 빈번한 마우스 이동은 무시 → 부드러움 개선
-        import time
         now = time.time()
         if now - self._last_mouse_move_time < self._mouse_move_interval:
             return
@@ -444,6 +630,9 @@ class DesktopWidget(QMainWindow):
     def closeEvent(self, event):
         """닫기 시 스트리밍 중지 + 설정 저장"""
         self._save_geometry()
+
+        # FPS 타이머 중지
+        self._fps_timer.stop()
 
         # 스트리밍 중지
         self._server.stop_streaming(self._pc.agent_id)

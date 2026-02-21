@@ -204,6 +204,8 @@ class WellcomAgent:
         self._running = True
         self._streaming = False
         self._stream_task = None
+        self._stream_fps = 15       # v2.0.1: 실시간 조절용
+        self._stream_quality = 60   # v2.0.1: 실시간 조절용
         self._thumbnail_push = False
         self._thumbnail_push_task = None
         self._agent_id = socket.gethostname()
@@ -480,6 +482,19 @@ class WellcomAgent:
         elif msg_type == 'stop_stream':
             self._streaming = False
 
+        elif msg_type == 'update_stream':
+            # v2.0.1 — 스트리밍 중 화질/FPS 실시간 변경
+            new_fps = msg.get('fps', self._stream_fps)
+            new_quality = msg.get('quality', self._stream_quality)
+            self._stream_fps = max(1, min(60, new_fps))
+            self._stream_quality = max(10, min(100, new_quality))
+            logger.info(f"스트리밍 설정 변경: {self._stream_fps}fps, Q={self._stream_quality}")
+
+        elif msg_type == 'special_key':
+            # v2.0.1 — 특수키 (Ctrl+Alt+Del, Alt+Tab, Win)
+            combo = msg.get('combo', '')
+            await self._handle_special_key(combo)
+
         elif msg_type == 'start_thumbnail_push':
             interval = msg.get('interval', 1.0)
             await self._start_thumbnail_push(websocket, interval)
@@ -587,15 +602,19 @@ class WellcomAgent:
             logger.info("썸네일 push 중지")
 
     async def _start_streaming(self, websocket, fps: int, quality: int):
-        """화면 스트리밍 시작"""
+        """화면 스트리밍 시작 (인스턴스 변수로 실시간 조절 가능)"""
         self._streaming = True
-        interval = 1.0 / max(1, fps)
-        logger.info(f"스트리밍 시작: {fps}fps, quality={quality}")
+        self._stream_fps = max(1, min(60, fps))
+        self._stream_quality = max(10, min(100, quality))
+        logger.info(f"스트리밍 시작: {self._stream_fps}fps, Q={self._stream_quality}")
 
         try:
             while self._streaming and self._running:
-                jpeg_data = self.screen_capture.capture_jpeg(quality=quality)
+                jpeg_data = self.screen_capture.capture_jpeg(
+                    quality=self._stream_quality,
+                )
                 await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                interval = 1.0 / max(1, self._stream_fps)
                 await asyncio.sleep(interval)
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -635,6 +654,38 @@ class WellcomAgent:
                 'stderr': str(e),
                 'returncode': -1,
             }))
+
+    async def _handle_special_key(self, combo: str):
+        """v2.0.1 — 특수키 조합 전송 (pynput)"""
+        try:
+            if combo == 'ctrl_alt_del':
+                # Ctrl+Alt+Del (SAS) — 일반 프로세스에서 직접 불가
+                # 대안: SASTrigger 레지스트리 또는 subprocess 사용
+                try:
+                    import ctypes
+                    ctypes.windll.user32.LockWorkStation()
+                    logger.info("특수키: Ctrl+Alt+Del → LockWorkStation 실행")
+                except Exception as e:
+                    logger.warning(f"Ctrl+Alt+Del 실패 (LockWorkStation): {e}")
+
+            elif combo == 'alt_tab':
+                self.input_handler.handle_key_event('alt', 'press', [])
+                self.input_handler.handle_key_event('tab', 'press', ['alt'])
+                await asyncio.sleep(0.05)
+                self.input_handler.handle_key_event('tab', 'release', ['alt'])
+                self.input_handler.handle_key_event('alt', 'release', [])
+                logger.info("특수키: Alt+Tab 전송")
+
+            elif combo == 'win':
+                self.input_handler.handle_key_event('meta', 'press', [])
+                await asyncio.sleep(0.05)
+                self.input_handler.handle_key_event('meta', 'release', [])
+                logger.info("특수키: Win 키 전송")
+
+            else:
+                logger.warning(f"알 수 없는 특수키 조합: {combo}")
+        except Exception as e:
+            logger.error(f"특수키 전송 오류 [{combo}]: {e}")
 
     async def _handle_clipboard_msg(self, msg: dict):
         """클립보드 메시지 수신"""
