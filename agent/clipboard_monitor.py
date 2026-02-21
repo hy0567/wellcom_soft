@@ -16,6 +16,31 @@ CF_HDROP = 15
 GMEM_MOVEABLE = 0x0002
 WM_CLIPBOARDUPDATE = 0x031D
 
+# WNDPROC 콜백 타입
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.wintypes.HWND,
+    ctypes.c_uint,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+)
+
+
+class WNDCLASSW(ctypes.Structure):
+    """Python 3.14+ 호환 WNDCLASSW 구조체 (ctypes.wintypes에서 제거됨)"""
+    _fields_ = [
+        ('style', ctypes.c_uint),
+        ('lpfnWndProc', WNDPROC),
+        ('cbClsExtra', ctypes.c_int),
+        ('cbWndExtra', ctypes.c_int),
+        ('hInstance', ctypes.wintypes.HINSTANCE),
+        ('hIcon', ctypes.wintypes.HICON),
+        ('hCursor', ctypes.wintypes.HANDLE),
+        ('hbrBackground', ctypes.wintypes.HANDLE),
+        ('lpszMenuName', ctypes.wintypes.LPCWSTR),
+        ('lpszClassName', ctypes.wintypes.LPCWSTR),
+    ]
+
 
 class ClipboardMonitor:
     """Win32 API로 클립보드 변경 감지 + 읽기/쓰기"""
@@ -57,14 +82,6 @@ class ClipboardMonitor:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
-        WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_long,
-            ctypes.wintypes.HWND,
-            ctypes.c_uint,
-            ctypes.wintypes.WPARAM,
-            ctypes.wintypes.LPARAM,
-        )
-
         def wnd_proc(hwnd, msg, wparam, lparam):
             if msg == WM_CLIPBOARDUPDATE:
                 if not self._ignore_next:
@@ -77,7 +94,7 @@ class ClipboardMonitor:
         self._wnd_proc_ref = WNDPROC(wnd_proc)
 
         class_name = 'WellcomAgentClipboard'
-        wc = ctypes.wintypes.WNDCLASSW()
+        wc = WNDCLASSW()
         wc.lpfnWndProc = self._wnd_proc_ref
         wc.hInstance = kernel32.GetModuleHandleW(None)
         wc.lpszClassName = class_name
