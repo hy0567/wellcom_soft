@@ -109,9 +109,11 @@ class AgentServer(QObject):
             token: JWT 토큰
         """
         if not WEBSOCKETS_AVAILABLE:
+            logger.error("[AgentServer] websockets 미설치 — 접속 불가")
             return
 
         if self._thread and self._thread.is_alive():
+            logger.info("[AgentServer] 이미 접속 스레드 실행 중 — 스킵")
             return
 
         # http(s) → ws(s) 변환
@@ -119,12 +121,17 @@ class AgentServer(QObject):
         self._server_url = f"{ws_url}/ws/manager?token={token}"
         self._token = token
 
+        # 토큰 일부만 로그 (보안)
+        token_preview = token[:20] + "..." if len(token) > 20 else token
+        logger.info(f"[AgentServer] 서버 URL: {server_url}")
+        logger.info(f"[AgentServer] WS URL: {ws_url}/ws/manager?token={token_preview}")
+
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True, name='AgentWSClient'
         )
         self._thread.start()
-        logger.info(f"[AgentServer] 서버 WS 접속 시작")
+        logger.info(f"[AgentServer] 서버 WS 접속 스레드 시작")
 
     def stop_connection(self):
         """서버 WS 연결 종료"""
@@ -345,10 +352,12 @@ class AgentServer(QObject):
     async def _connect(self):
         """서버 WS에 접속 + 자동 재연결 루프"""
         reconnect_interval = 5  # 초
+        connect_count = 0
 
         while not self._stop_event.is_set():
+            connect_count += 1
             try:
-                logger.info(f"[AgentServer] 서버 WS 접속 시도...")
+                logger.info(f"[AgentServer] 서버 WS 접속 시도 (#{connect_count})...")
                 async with websockets.connect(
                     self._server_url,
                     max_size=50 * 1024 * 1024,
@@ -356,28 +365,45 @@ class AgentServer(QObject):
                     ping_timeout=10,
                 ) as ws:
                     self._ws = ws
-                    logger.info(f"[AgentServer] 서버 WS 접속 성공")
+                    logger.info(f"[AgentServer] 서버 WS 접속 성공 (#{connect_count})")
+                    logger.info(f"[AgentServer] 메시지 수신 루프 시작 — 에이전트 대기 중...")
 
+                    msg_count = 0
                     # 메시지 수신 루프
                     async for message in ws:
                         if self._stop_event.is_set():
                             break
+                        msg_count += 1
                         if isinstance(message, str):
+                            # 메시지 타입 로그 (첫 200자만)
+                            try:
+                                preview = json.loads(message)
+                                msg_type = preview.get('type', '?')
+                                source = preview.get('source_agent', '') or preview.get('agent_id', '')
+                                logger.info(f"[AgentServer] 수신 #{msg_count}: type={msg_type}, agent={source}")
+                            except Exception:
+                                logger.info(f"[AgentServer] 수신 #{msg_count}: text ({len(message)}B)")
                             self._handle_text_message(message)
                         elif isinstance(message, bytes):
+                            logger.debug(f"[AgentServer] 수신 #{msg_count}: binary ({len(message)}B)")
                             self._handle_binary_message(message)
 
-            except websockets.exceptions.ConnectionClosed:
-                logger.info("[AgentServer] 서버 WS 연결 종료")
+                    logger.info(f"[AgentServer] 메시지 루프 종료 (총 {msg_count}개 수신)")
+
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"[AgentServer] 서버 WS 연결 종료: code={e.code}, reason={e.reason}")
             except (ConnectionRefusedError, OSError) as e:
                 logger.warning(f"[AgentServer] 서버 접속 실패: {e}")
             except Exception as e:
                 if not self._stop_event.is_set():
-                    logger.warning(f"[AgentServer] 서버 접속 오류: {e}")
+                    logger.warning(f"[AgentServer] 서버 접속 오류: {type(e).__name__}: {e}")
             finally:
                 self._ws = None
                 # 모든 에이전트 연결 해제 처리
-                for aid in list(self._connected_agents):
+                disconnected = list(self._connected_agents)
+                if disconnected:
+                    logger.info(f"[AgentServer] WS 끊김 — {len(disconnected)}개 에이전트 해제: {disconnected}")
+                for aid in disconnected:
                     self._connected_agents.discard(aid)
                     self.agent_disconnected.emit(aid)
 
@@ -433,6 +459,7 @@ class AgentServer(QObject):
 
         # 에이전트로부터의 일반 메시지
         if not agent_id:
+            logger.debug(f"[AgentServer] source_agent 없는 메시지 무시: type={msg_type}")
             return
 
         if msg_type == 'clipboard':

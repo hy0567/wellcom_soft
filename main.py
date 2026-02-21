@@ -235,16 +235,20 @@ def main():
     # 서버 API URL과 JWT 토큰으로 WS 릴레이 접속
     _server_url = _api._base_url
     _token = _api.token
+    logger.info(f"서버 API URL: {_server_url}")
+    logger.info(f"JWT 토큰: {_token[:20]}..." if len(_token) > 20 else f"JWT 토큰: {_token}")
+    logger.info(f"로그인 사용자: {_api.username} (ID: {_api.user_id})")
     agent_server.start_connection(_server_url, _token)
-    logger.info(f"서버 WS 릴레이 접속 (포트포워딩 불필요)")
+    logger.info(f"서버 WS 릴레이 접속 요청 완료 (포트포워딩 불필요)")
 
     # PC 매니저 초기화
     from core.pc_manager import PCManager
     pc_manager = PCManager(agent_server)
 
     # 서버에서 에이전트 목록 동기화
+    logger.info("서버에서 에이전트 목록 동기화 시작...")
     pc_manager.load_from_server()
-    logger.info("서버에서 에이전트 목록 동기화 완료")
+    logger.info(f"서버에서 에이전트 목록 동기화 완료 (총 {len(pc_manager.pcs)}개)")
 
     # 메인 윈도우
     from ui.main_window import MainWindow
