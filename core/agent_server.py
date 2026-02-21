@@ -353,9 +353,11 @@ class AgentServer(QObject):
         """서버 WS에 접속 + 자동 재연결 루프"""
         reconnect_interval = 5  # 초
         connect_count = 0
+        replaced_count = 0  # 연속 4002 카운터
 
         while not self._stop_event.is_set():
             connect_count += 1
+            was_replaced = False
             try:
                 logger.info(f"[AgentServer] 서버 WS 접속 시도 (#{connect_count})...")
                 async with websockets.connect(
@@ -366,7 +368,8 @@ class AgentServer(QObject):
                 ) as ws:
                     self._ws = ws
                     logger.info(f"[AgentServer] 서버 WS 접속 성공 (#{connect_count})")
-                    logger.info(f"[AgentServer] 메시지 수신 루프 시작 — 에이전트 대기 중...")
+                    reconnect_interval = 5  # 성공 시 간격 리셋
+                    replaced_count = 0       # 연속 교체 카운터 리셋
 
                     msg_count = 0
                     # 메시지 수신 루프
@@ -375,7 +378,7 @@ class AgentServer(QObject):
                             break
                         msg_count += 1
                         if isinstance(message, str):
-                            # 메시지 타입 로그 (첫 200자만)
+                            # 메시지 타입 로그
                             try:
                                 preview = json.loads(message)
                                 msg_type = preview.get('type', '?')
@@ -391,7 +394,14 @@ class AgentServer(QObject):
                     logger.info(f"[AgentServer] 메시지 루프 종료 (총 {msg_count}개 수신)")
 
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"[AgentServer] 서버 WS 연결 종료: code={e.code}, reason={e.reason}")
+                if e.code == 4002:
+                    replaced_count += 1
+                    was_replaced = True
+                    logger.warning(
+                        f"[AgentServer] 연결 교체됨 (code=4002, 연속 {replaced_count}회)"
+                    )
+                else:
+                    logger.warning(f"[AgentServer] 서버 WS 연결 종료: code={e.code}, reason={e.reason}")
             except (ConnectionRefusedError, OSError) as e:
                 logger.warning(f"[AgentServer] 서버 접속 실패: {e}")
             except Exception as e:
@@ -407,9 +417,21 @@ class AgentServer(QObject):
                     self._connected_agents.discard(aid)
                     self.agent_disconnected.emit(aid)
 
+            # 연속 교체(4002) 3회 이상이면 다른 매니저 인스턴스가 활성 → 재접속 중단
+            if replaced_count >= 3:
+                logger.warning(
+                    f"[AgentServer] 연속 {replaced_count}회 교체 — "
+                    "다른 매니저가 활성 상태. 재접속 중단"
+                )
+                break
+
             if not self._stop_event.is_set():
-                logger.info(f"[AgentServer] 재접속 대기... ({reconnect_interval}초)")
-                await asyncio.sleep(reconnect_interval)
+                # 교체 시 더 긴 대기 (서버가 이전 연결 정리)
+                wait = 10 if was_replaced else reconnect_interval
+                logger.info(f"[AgentServer] 재접속 대기... ({wait}초)")
+                await asyncio.sleep(wait)
+                if not was_replaced:
+                    reconnect_interval = min(reconnect_interval + 5, 30)
 
     def _handle_text_message(self, raw: str):
         """서버에서 릴레이된 JSON 텍스트 메시지 처리

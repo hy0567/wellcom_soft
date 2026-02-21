@@ -66,19 +66,23 @@ class PCDevice:
 
     @property
     def is_online(self) -> bool:
-        return self.status == PCStatus.ONLINE and self.agent_ws is not None
+        return self.status == PCStatus.ONLINE
 
     def update_thumbnail(self, jpeg_data: bytes):
         """썸네일 이미지 업데이트"""
         self.last_thumbnail = jpeg_data
         self.thumbnail_time = time.time()
 
-    def mark_online(self, ws, remote_ip: str):
-        """에이전트 연결됨"""
+    def mark_online(self, ws=None, remote_ip: str = ''):
+        """에이전트 연결됨
+
+        릴레이 모드에서는 ws=None (서버가 중계).
+        """
         self.agent_ws = ws
         self.status = PCStatus.ONLINE
         self.last_seen = time.time()
-        self.info.ip = remote_ip
+        if remote_ip:
+            self.info.ip = remote_ip
 
     def mark_offline(self):
         """에이전트 연결 해제"""

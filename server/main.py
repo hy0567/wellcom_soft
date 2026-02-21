@@ -611,6 +611,8 @@ async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
             await old_ws.close(code=4002, reason="Replaced by new connection")
         except Exception:
             pass
+        # 이전 연결 핸들러 정리 대기
+        await asyncio.sleep(0.1)
 
     _ws_managers[owner_id] = ws
     logger.info(f"[WS Relay] 매니저 접속: owner_id={owner_id} ({user['username']})")
