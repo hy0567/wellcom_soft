@@ -23,6 +23,12 @@ def _get_base_dir():
 BASE_DIR = _get_base_dir()
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
+# v2.0.8: app/_vendor/ 서드파티 패키지 경로 추가
+# PyInstaller 빌드에서 websockets 등이 누락된 경우 대비
+_vendor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
+if os.path.isdir(_vendor_dir) and _vendor_dir not in sys.path:
+    sys.path.insert(0, _vendor_dir)
+
 
 # ==================== 로깅 ====================
 
