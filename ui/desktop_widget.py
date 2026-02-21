@@ -16,8 +16,11 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QInputDialog,
     QMessageBox, QApplication, QStatusBar, QLabel,
 )
-from PyQt6.QtCore import Qt, QByteArray, pyqtSignal, QTimer
-from PyQt6.QtGui import QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent, QFont, QColor
+from PyQt6.QtCore import Qt, QByteArray, pyqtSignal, QTimer, QPoint
+from PyQt6.QtGui import (
+    QPainter, QPixmap, QKeyEvent, QMouseEvent, QWheelEvent, QFont, QColor,
+    QPen, QPolygon,
+)
 
 from config import settings
 from core.pc_device import PCDevice
@@ -53,6 +56,7 @@ class RemoteScreenWidget(QWidget):
     """원격 화면 렌더링 위젯 (최적화)
 
     v2.0.1: Fit/Stretch 화면 비율 토글 지원
+    v2.2.0: 로컬 커서 오버레이 (LinkIO처럼 즉시 반응)
     """
 
     # 화면 비율 모드
@@ -75,6 +79,12 @@ class RemoteScreenWidget(QWidget):
 
         # 더블 버퍼링 활성화
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+        # v2.2.0: 로컬 커서 오버레이 — 마우스 이동 시 즉시 반응
+        self._local_cursor_pos = None   # (x, y) 또는 None (숨김)
+        self._local_cursor_visible = True  # 로컬 커서 표시 여부
+        self._cursor_click_effect = 0.0   # 클릭 이펙트 (0=없음, 1=최대)
+        self.setCursor(Qt.CursorShape.BlankCursor)  # OS 커서 숨김
 
     @property
     def current_pixmap(self) -> QPixmap:
@@ -167,6 +177,16 @@ class RemoteScreenWidget(QWidget):
         self._overlay_color = color
         self.update()
 
+    def update_local_cursor(self, x: int, y: int):
+        """v2.2.0: 로컬 커서 위치 업데이트 (즉시 렌더링)"""
+        self._local_cursor_pos = (x, y)
+        self.update()  # 즉시 repaint 요청
+
+    def set_cursor_click(self, pressed: bool):
+        """v2.2.0: 클릭 시각 이펙트"""
+        self._cursor_click_effect = 1.0 if pressed else 0.0
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
@@ -174,6 +194,35 @@ class RemoteScreenWidget(QWidget):
             x = (self.width() - self._scaled_pixmap.width()) // 2
             y = (self.height() - self._scaled_pixmap.height()) // 2
             painter.drawPixmap(x, y, self._scaled_pixmap)
+
+        # v2.2.0: 로컬 커서 오버레이 — 원격 응답 기다리지 않고 즉시 표시
+        if self._local_cursor_visible and self._local_cursor_pos:
+            cx, cy = self._local_cursor_pos
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            # 클릭 이펙트: 클릭 시 원형 표시
+            if self._cursor_click_effect > 0:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 165, 0, 120))  # 주황 반투명
+                painter.drawEllipse(cx - 12, cy - 12, 24, 24)
+
+            # 커서: 흰 화살표 + 검은 테두리 (표준 커서 모양 간략화)
+            cursor_shape = QPolygon([
+                QPoint(cx, cy),           # 꼭지점 (핫스팟)
+                QPoint(cx, cy + 18),      # 왼쪽 하단
+                QPoint(cx + 5, cy + 14),  # 중간 꺾임
+                QPoint(cx + 10, cy + 20), # 오른쪽 하단 꼬리
+                QPoint(cx + 12, cy + 17), # 꼬리 끝
+                QPoint(cx + 7, cy + 12),  # 중간 꺾임
+                QPoint(cx + 13, cy + 12), # 오른쪽
+                QPoint(cx, cy),           # 닫기
+            ])
+            # 검은 외곽선
+            painter.setPen(QPen(QColor(0, 0, 0), 1.5))
+            painter.setBrush(QColor(255, 255, 255, 230))
+            painter.drawPolygon(cursor_shape)
+
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         # 상태 오버레이
         overlay = getattr(self, '_overlay_text', '')
@@ -721,6 +770,17 @@ class DesktopWidget(QMainWindow):
         elif event.type() == QEvent.Type.Wheel:
             self._on_wheel(event)
             return True
+        # v2.2.0: 마우스 진입/이탈 시 로컬 커서 표시/숨김
+        elif event.type() == QEvent.Type.Enter:
+            self._screen._local_cursor_visible = True
+            self._screen.setCursor(Qt.CursorShape.BlankCursor)
+            return False
+        elif event.type() == QEvent.Type.Leave:
+            self._screen._local_cursor_pos = None
+            self._screen._local_cursor_visible = False
+            self._screen.setCursor(Qt.CursorShape.ArrowCursor)
+            self._screen.update()
+            return False
 
         return False
 
@@ -772,6 +832,10 @@ class DesktopWidget(QMainWindow):
     def _on_mouse_press(self, event: QMouseEvent):
         x, y = self._map_mouse(event)
         button = self._button_name(event.button())
+        # v2.2.0: 로컬 커서 위치 + 클릭 이펙트
+        lx, ly = int(event.position().x()), int(event.position().y())
+        self._screen.update_local_cursor(lx, ly)
+        self._screen.set_cursor_click(True)
         logger.info(
             f"[{self._pc.name}] 🖱 클릭 전송: btn={button}, remote=({x},{y}), "
             f"local=({int(event.position().x())},{int(event.position().y())})"
@@ -784,13 +848,19 @@ class DesktopWidget(QMainWindow):
     def _on_mouse_release(self, event: QMouseEvent):
         x, y = self._map_mouse(event)
         button = self._button_name(event.button())
+        # v2.2.0: 클릭 이펙트 해제
+        self._screen.set_cursor_click(False)
         if self._multi_control and self._multi_control.is_active:
             self._multi_control.broadcast_mouse_event(x, y, button, 'release')
         else:
             self._server.send_mouse_event(self._pc.agent_id, x, y, button, 'release')
 
     def _on_mouse_move(self, event: QMouseEvent):
-        # 쓰로틀링: 너무 빈번한 마우스 이동은 무시 → 부드러움 개선
+        # v2.2.0: 로컬 커서는 즉시 업데이트 (쓰로틀 없이)
+        lx, ly = int(event.position().x()), int(event.position().y())
+        self._screen.update_local_cursor(lx, ly)
+
+        # 원격 전송은 쓰로틀링 적용
         now = time.time()
         if now - self._last_mouse_move_time < self._mouse_move_interval:
             return
