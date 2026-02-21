@@ -367,6 +367,12 @@ class DesktopWidget(QMainWindow):
         self._screen.update_frame(jpeg_data)
         self._frame_count += 1
 
+        # 첫 프레임 + 100프레임마다 로깅
+        if self._frame_count == 1:
+            logger.info(f"[{self._pc.name}] 첫 프레임 수신: {len(jpeg_data)}B")
+        elif self._frame_count % 100 == 0:
+            logger.info(f"[{self._pc.name}] 프레임 #{self._frame_count}: {len(jpeg_data)}B")
+
         # 해상도 표시 갱신
         pix = self._screen.current_pixmap
         if not pix.isNull():

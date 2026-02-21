@@ -100,6 +100,10 @@ class AgentServer(QObject):
             token: JWT 토큰
         """
         if not WEBSOCKETS_AVAILABLE:
+            logger.error(
+                "[AgentServer] websockets 미설치 — 서버 접속 불가! "
+                "pip install websockets 또는 app/_vendor/ 에 번들 필요"
+            )
             return
 
         if self._thread and self._thread.is_alive():
@@ -335,7 +339,8 @@ class AgentServer(QObject):
                     ping_timeout=10,
                 ) as ws:
                     self._ws = ws
-                    logger.info("[AgentServer] 서버 릴레이 접속 성공")
+                    self._binary_frame_count = 0
+                    logger.info("[AgentServer] 서버 릴레이 접속 성공 — 메시지 수신 대기")
 
                     # 메시지 수신 루프
                     async for message in ws:
@@ -462,24 +467,40 @@ class AgentServer(QObject):
             output = stdout if stdout else stderr
             self.command_result.emit(agent_id, command, output, returncode)
 
+    _binary_frame_count: int = 0  # 디버그: 바이너리 프레임 수신 카운터
+
     def _handle_relay_binary(self, data: bytes):
         """서버에서 릴레이된 바이너리 메시지 처리
 
         포맷: agent_id(32바이트) + 원본 바이너리(헤더 + JPEG)
         """
         if len(data) < AGENT_ID_LEN + 2:
+            logger.debug(f"[AgentServer] 바이너리 프레임 너무 짧음: {len(data)}B")
             return
 
         agent_id = _unpad_agent_id(data[:AGENT_ID_LEN])
         payload = data[AGENT_ID_LEN:]
 
         header = payload[0]
-        jpeg_data = payload[1:]
+        frame_data = payload[1:]
+
+        self._binary_frame_count += 1
+        # 첫 프레임 + 100프레임마다 로깅
+        if self._binary_frame_count == 1:
+            logger.info(
+                f"[AgentServer] 첫 바이너리 프레임: agent={agent_id}, "
+                f"header=0x{header:02x}, size={len(frame_data)}B"
+            )
+        elif self._binary_frame_count % 100 == 0:
+            logger.info(
+                f"[AgentServer] 바이너리 #{self._binary_frame_count}: "
+                f"agent={agent_id}, header=0x{header:02x}, size={len(frame_data)}B"
+            )
 
         if header == self.HEADER_THUMBNAIL:
-            self.thumbnail_received.emit(agent_id, jpeg_data)
+            self.thumbnail_received.emit(agent_id, frame_data)
         elif header == self.HEADER_STREAM:
-            self.screen_frame_received.emit(agent_id, jpeg_data)
+            self.screen_frame_received.emit(agent_id, frame_data)
         elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
             # v2.0.2 — H.264 프레임: header(0x03|0x04) + [4B seq + NAL]
-            self.h264_frame_received.emit(agent_id, header, jpeg_data)
+            self.h264_frame_received.emit(agent_id, header, frame_data)

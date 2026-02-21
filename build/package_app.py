@@ -5,6 +5,10 @@
 
 보안: .py 소스를 .pyc 바이트코드로 컴파일하여 패키징.
 사용자가 코드를 직접 읽을 수 없음.
+
+v2.0.8: 서드파티 패키지(websockets) 번들링 추가
+  - PyInstaller 빌드에 websockets가 불완전 포함된 경우 대비
+  - app.zip 내에 _vendor/ 디렉터리로 패키지 포함
 """
 
 import os
@@ -16,6 +20,7 @@ import zipfile
 import hashlib
 import json
 import tempfile
+import importlib
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).parent.parent  # wellcomsoft/
@@ -61,6 +66,12 @@ APP_FILES = [
     'agent/file_receiver.py',
 ]
 
+# v2.0.8: 서드파티 패키지 번들링
+# PyInstaller 빌드에서 누락될 수 있는 pure-Python 패키지를 app.zip에 포함
+VENDOR_PACKAGES = [
+    'websockets',  # WebSocket 클라이언트 (agent_server.py에서 사용)
+]
+
 
 def compile_to_pyc(src_path: Path, dest_dir: Path, rel_path: str):
     """
@@ -85,6 +96,69 @@ def compile_to_pyc(src_path: Path, dest_dir: Path, rel_path: str):
     except py_compile.PyCompileError as e:
         print(f"  컴파일 오류: {rel_path} - {e}")
         return None
+
+
+def _bundle_vendor_package(pkg_name: str, tmp_path: Path):
+    """서드파티 패키지를 _vendor/ 디렉터리로 번들링
+
+    site-packages에서 패키지를 찾아 .py 파일을 .pyc로 컴파일하여
+    _vendor/패키지명/ 으로 복사.
+
+    Returns:
+        list[str]: ZIP 내 상대 경로 목록
+    """
+    bundled = []
+    try:
+        mod = importlib.import_module(pkg_name)
+        pkg_dir = Path(mod.__file__).parent
+    except (ImportError, AttributeError, TypeError):
+        print(f"  경고: {pkg_name} 패키지를 찾을 수 없음 — 스킵")
+        return bundled
+
+    print(f"  패키지: {pkg_name} ({pkg_dir})")
+
+    vendor_dest = tmp_path / "_vendor" / pkg_name
+    vendor_dest.mkdir(parents=True, exist_ok=True)
+
+    for src_file in pkg_dir.rglob("*.py"):
+        rel = src_file.relative_to(pkg_dir)
+        # __pycache__ 스킵
+        if '__pycache__' in str(rel):
+            continue
+
+        pyc_rel_in_vendor = f"_vendor/{pkg_name}/{rel}"
+        pyc_dest = tmp_path / pyc_rel_in_vendor.replace('.py', '.pyc')
+        pyc_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            py_compile.compile(
+                str(src_file),
+                cfile=str(pyc_dest),
+                doraise=True,
+                optimize=2,
+            )
+            bundled.append(pyc_rel_in_vendor.replace('.py', '.pyc'))
+        except py_compile.PyCompileError as e:
+            # 컴파일 실패 시 소스 그대로 복사
+            src_dest = tmp_path / pyc_rel_in_vendor
+            src_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, src_dest)
+            bundled.append(pyc_rel_in_vendor)
+            print(f"    컴파일 실패 (소스 복사): {rel} - {e}")
+
+    # .pyd / .so 파일도 복사 (C 확장)
+    for ext_file in pkg_dir.rglob("*.pyd"):
+        if '__pycache__' in str(ext_file):
+            continue
+        rel = ext_file.relative_to(pkg_dir)
+        ext_rel = f"_vendor/{pkg_name}/{rel}"
+        ext_dest = tmp_path / ext_rel
+        ext_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ext_file, ext_dest)
+        bundled.append(ext_rel)
+
+    print(f"    → {len(bundled)} 파일 번들")
+    return bundled
 
 
 def create_app_zip():
@@ -123,6 +197,12 @@ def create_app_zip():
         shutil.copy2(version_src, version_dest)
         print(f"  복사: version.py (소스 유지 - 버전 확인용)")
 
+        # v2.0.8: 서드파티 패키지 번들링
+        print("\n--- 서드파티 패키지 번들링 ---")
+        vendor_files = []
+        for pkg_name in VENDOR_PACKAGES:
+            vendor_files.extend(_bundle_vendor_package(pkg_name, tmp_path))
+
         # ZIP 생성
         print(f"\n--- ZIP 패키징 ---")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -134,6 +214,12 @@ def create_app_zip():
 
             # version.py 소스 추가
             zf.write(version_dest, "version.py")
+
+            # 서드파티 패키지 추가
+            for vendor_rel in vendor_files:
+                vendor_path = tmp_path / vendor_rel
+                if vendor_path.exists():
+                    zf.write(vendor_path, vendor_rel)
 
     # SHA256 체크섬
     sha256 = hashlib.sha256()

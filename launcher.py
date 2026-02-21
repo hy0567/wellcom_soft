@@ -742,6 +742,12 @@ def load_and_run_app():
     if app_path not in sys.path:
         sys.path.insert(0, app_path)
 
+    # v2.0.8: app/_vendor/ 를 sys.path에 추가 (번들된 서드파티 패키지)
+    vendor_path = str(APP_DIR / "_vendor")
+    if os.path.isdir(vendor_path) and vendor_path not in sys.path:
+        sys.path.insert(1, vendor_path)
+        logger.info(f"번들 패키지 경로 추가: {vendor_path}")
+
     # 환경변수 전달
     os.environ['WELLCOMSOFT_BASE_DIR'] = str(INSTALL_DIR)
     os.environ['WELLCOMSOFT_EXE_PATH'] = str(_get_exe_path())
