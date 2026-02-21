@@ -69,13 +69,13 @@ class LogTee:
 def setup_logging():
     """로깅 설정
 
-    console=False EXE에서는 sys.stdout/stderr가 None이므로:
-    - LogTee로 파일 출력을 보장 (콘솔은 None이면 스킵)
-    - StreamHandler 대신 FileHandler 사용 (stdout이 None일 때)
+    EXE 환경 (frozen):
+      - sys.stdout = LogTee(app.log) 으로 교체 → print()가 파일에 기록됨
+      - logging은 FileHandler(app.log) 1개만 등록 (LogTee 경유 안 함 → 중복 방지)
+    개발 환경:
+      - StreamHandler(stdout) → 콘솔 출력
 
-    중요: launcher.py(구버전 EXE)가 이미 root logger에 StreamHandler(None)를
-    등록했을 수 있으므로, 기존 핸들러를 모두 제거하고 안전한 핸들러만 등록.
-    (logging.basicConfig는 핸들러가 이미 있으면 무시되므로 force=True 사용)
+    중요: 런처가 이미 root logger에 핸들러를 등록했을 수 있으므로 모두 제거 후 재등록.
     """
     log_path = os.path.join(LOG_DIR, "app.log")
 
@@ -92,13 +92,12 @@ def setup_logging():
     except Exception:
         pass
 
-    # EXE 환경에서 stdout/stderr 리디렉트
+    # EXE 환경에서 stdout/stderr 리디렉트 (print → 파일)
     if getattr(sys, 'frozen', False):
-        # stdout/stderr가 None이면 LogTee가 파일에만 출력
         sys.stdout = LogTee(log_path, sys.stdout)
         sys.stderr = LogTee(log_path, sys.stderr)
 
-    # ★ 기존 핸들러 모두 제거 (구버전 런처가 등록한 깨진 StreamHandler 포함)
+    # ★ 기존 핸들러 모두 제거 (런처가 등록한 깨진/중복 핸들러 포함)
     root = logging.getLogger()
     for h in root.handlers[:]:
         try:
@@ -107,29 +106,25 @@ def setup_logging():
             pass
         root.removeHandler(h)
 
-    # 안전한 핸들러만 등록
-    handlers = []
+    # 핸들러 등록 (1개만 — 중복 방지)
+    handler = None
+    if getattr(sys, 'frozen', False):
+        # EXE: FileHandler만 (LogTee가 stdout/print 담당, logging은 파일 직접)
+        try:
+            handler = logging.FileHandler(log_path, encoding='utf-8')
+        except Exception:
+            pass
+    else:
+        # 개발 환경: 콘솔 출력
+        handler = logging.StreamHandler(sys.stdout)
 
-    # FileHandler (항상 추가 — 핵심 로그 출력)
-    try:
-        handlers.append(
-            logging.FileHandler(log_path, encoding='utf-8')
-        )
-    except Exception:
-        pass
-
-    # stdout이 유효할 때만 StreamHandler 추가
-    if sys.stdout is not None and hasattr(sys.stdout, 'write'):
-        handlers.append(logging.StreamHandler(sys.stdout))
-
-    # 핸들러가 하나도 없으면 NullHandler라도 추가
-    if not handlers:
-        handlers.append(logging.NullHandler())
+    if handler is None:
+        handler = logging.NullHandler()
 
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-        handlers=handlers,
+        handlers=[handler],
     )
 
 
