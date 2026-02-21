@@ -4,7 +4,7 @@
 ; 출력: dist/WellcomSOFT_Setup.exe
 
 #define MyAppName "WellcomSOFT"
-#define MyAppVersion "1.9.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Wellcom"
 #define MyAppExeName "WellcomSOFT.exe"
 
