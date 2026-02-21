@@ -297,10 +297,14 @@ def check_and_apply_update():
     body = data.get("body", "")
     for line in body.split('\n'):
         if f'SHA256({ASSET_NAME})' in line and ':' in line:
-            expected_checksum = line.split(':', 1)[1].strip()
+            expected_checksum = line.split(':', 1)[1].strip().strip('` ')
+            break
+        elif ASSET_NAME in line and 'SHA256' in line.upper() and ':' in line:
+            # 마크다운 형식: `agent.zip` SHA256: `hash`
+            expected_checksum = line.split(':')[-1].strip().strip('` ')
             break
         elif 'SHA256' in line.upper() and '(' not in line and ':' in line:
-            expected_checksum = line.split(':')[-1].strip()
+            expected_checksum = line.split(':')[-1].strip().strip('` ')
             break
 
     # ── 4) 다운로드 ──
