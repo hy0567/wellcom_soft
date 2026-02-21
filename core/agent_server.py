@@ -52,6 +52,8 @@ class AgentServer(QObject):
     agent_disconnected = pyqtSignal(str)            # agent_id
     thumbnail_received = pyqtSignal(str, bytes)     # agent_id, jpeg_data
     screen_frame_received = pyqtSignal(str, bytes)  # agent_id, jpeg_data
+    h264_frame_received = pyqtSignal(str, int, bytes)  # agent_id, header(0x03|0x04), raw_data  v2.0.2
+    stream_started = pyqtSignal(str, dict)           # agent_id, info_dict  v2.0.2
     clipboard_received = pyqtSignal(str, str, object)  # agent_id, format, data
     file_progress = pyqtSignal(str, int, int)       # agent_id, sent, total
     file_complete = pyqtSignal(str, str)            # agent_id, remote_path
@@ -62,6 +64,8 @@ class AgentServer(QObject):
     # 바이너리 프레임 헤더
     HEADER_THUMBNAIL = 0x01
     HEADER_STREAM = 0x02
+    HEADER_H264_KEYFRAME = 0x03   # v2.0.2
+    HEADER_H264_DELTA = 0x04      # v2.0.2
 
     def __init__(self):
         super().__init__()
@@ -142,9 +146,11 @@ class AgentServer(QObject):
     def request_thumbnail(self, agent_id: str):
         self._send_to_agent(agent_id, {'type': 'request_thumbnail'})
 
-    def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
+    def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60,
+                        codec: str = 'h264', keyframe_interval: int = 60):
         self._send_to_agent(agent_id, {
             'type': 'start_stream', 'fps': fps, 'quality': quality,
+            'codec': codec, 'keyframe_interval': keyframe_interval,
         })
 
     def stop_streaming(self, agent_id: str):
@@ -161,6 +167,10 @@ class AgentServer(QObject):
         self._send_to_agent(agent_id, {
             'type': 'special_key', 'combo': key_combo,
         })
+
+    def request_keyframe(self, agent_id: str):
+        """H.264 키프레임 강제 요청 (v2.0.2)"""
+        self._send_to_agent(agent_id, {'type': 'request_keyframe'})
 
     def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
         self._send_to_agent(agent_id, {
@@ -406,6 +416,23 @@ class AgentServer(QObject):
         if not agent_id:
             return
 
+        if msg_type == 'stream_started':
+            # v2.0.2 — 코덱 협상 응답
+            info = {
+                'codec': msg.get('codec', 'mjpeg'),
+                'encoder': msg.get('encoder', ''),
+                'width': msg.get('width', 0),
+                'height': msg.get('height', 0),
+                'fps': msg.get('fps', 15),
+                'quality': msg.get('quality', 60),
+            }
+            self.stream_started.emit(agent_id, info)
+            logger.info(
+                f"[AgentServer] 스트림 시작: {agent_id} "
+                f"codec={info['codec']}, encoder={info['encoder']}"
+            )
+            return
+
         if msg_type == 'clipboard':
             fmt = msg.get('format', '')
             data = msg.get('data', '')
@@ -453,3 +480,6 @@ class AgentServer(QObject):
             self.thumbnail_received.emit(agent_id, jpeg_data)
         elif header == self.HEADER_STREAM:
             self.screen_frame_received.emit(agent_id, jpeg_data)
+        elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
+            # v2.0.2 — H.264 프레임: header(0x03|0x04) + [4B seq + NAL]
+            self.h264_frame_received.emit(agent_id, header, jpeg_data)

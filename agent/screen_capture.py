@@ -130,6 +130,31 @@ class ScreenCapture:
             # 최소 바이트 반환
             return b''
 
+    def capture_raw(self):
+        """화면 캡처 → PIL Image (RGB) 반환 (H.264 인코더용)
+
+        JPEG 인코딩을 거치지 않고 PIL Image를 직접 반환.
+        H.264 인코더가 numpy 변환 후 인코딩에 사용.
+
+        Returns:
+            PIL.Image (RGB) 또는 None (캡처 실패)
+        """
+        if not PIL_AVAILABLE:
+            return None
+
+        if not self._sct or not self._monitor:
+            if not self._init_mss():
+                return None
+
+        try:
+            screenshot = self._sct.grab(self._monitor)
+            img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
+            return img
+        except Exception as e:
+            logger.error(f"[ScreenCapture] capture_raw 실패: {type(e).__name__}: {e}")
+            self._init_mss()
+            return None
+
     def capture_jpeg(self, quality: int = 60, scale: float = 1.0) -> bytes:
         """화면 캡처 → JPEG 바이트
 

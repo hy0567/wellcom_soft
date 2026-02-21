@@ -60,6 +60,15 @@ STARTUP_REG_NAME = 'WellcomAgent'
 # 바이너리 프레임 헤더
 HEADER_THUMBNAIL = 0x01
 HEADER_STREAM = 0x02
+HEADER_H264_KEYFRAME = 0x03
+HEADER_H264_DELTA = 0x04
+
+# H.264 인코더 (PyAV)
+try:
+    from h264_encoder import H264Encoder, AV_AVAILABLE as H264_AVAILABLE
+except ImportError:
+    H264_AVAILABLE = False
+    H264Encoder = None
 
 
 class AgentAPIClient:
@@ -206,6 +215,8 @@ class WellcomAgent:
         self._stream_task = None
         self._stream_fps = 15       # v2.0.1: 실시간 조절용
         self._stream_quality = 60   # v2.0.1: 실시간 조절용
+        self._stream_codec = 'mjpeg'  # v2.0.2: 'mjpeg' 또는 'h264'
+        self._h264_encoder: Optional[object] = None  # v2.0.2: H264Encoder 인스턴스
         self._thumbnail_push = False
         self._thumbnail_push_task = None
         self._agent_id = socket.gethostname()
@@ -454,6 +465,9 @@ class WellcomAgent:
                 self._ws = None
                 self._streaming = False
                 self._thumbnail_push = False
+                if self._h264_encoder:
+                    self._h264_encoder.close()
+                    self._h264_encoder = None
 
             if self._running:
                 logger.info("5초 후 재연결...")
@@ -477,7 +491,9 @@ class WellcomAgent:
         elif msg_type == 'start_stream':
             fps = msg.get('fps', self.config.screen_fps)
             quality = msg.get('quality', self.config.screen_quality)
-            await self._start_streaming(websocket, fps, quality)
+            codec = msg.get('codec', 'h264')  # v2.0.2: 기본 h264, 불가 시 mjpeg 폴백
+            keyframe_interval = msg.get('keyframe_interval', 60)
+            await self._start_streaming(websocket, fps, quality, codec, keyframe_interval)
 
         elif msg_type == 'stop_stream':
             self._streaming = False
@@ -486,9 +502,19 @@ class WellcomAgent:
             # v2.0.1 — 스트리밍 중 화질/FPS 실시간 변경
             new_fps = msg.get('fps', self._stream_fps)
             new_quality = msg.get('quality', self._stream_quality)
+            old_quality = self._stream_quality
             self._stream_fps = max(1, min(60, new_fps))
             self._stream_quality = max(10, min(100, new_quality))
+            # v2.0.2 — H.264 인코더 화질 업데이트
+            if self._h264_encoder and old_quality != self._stream_quality:
+                self._h264_encoder.update_quality(self._stream_quality)
             logger.info(f"스트리밍 설정 변경: {self._stream_fps}fps, Q={self._stream_quality}")
+
+        elif msg_type == 'request_keyframe':
+            # v2.0.2 — H.264 키프레임 강제 요청
+            if self._h264_encoder:
+                self._h264_encoder.force_keyframe()
+                logger.info("키프레임 강제 요청 수신")
 
         elif msg_type == 'special_key':
             # v2.0.1 — 특수키 (Ctrl+Alt+Del, Alt+Tab, Win)
@@ -601,28 +627,103 @@ class WellcomAgent:
             self._thumbnail_push = False
             logger.info("썸네일 push 중지")
 
-    async def _start_streaming(self, websocket, fps: int, quality: int):
-        """화면 스트리밍 시작 (인스턴스 변수로 실시간 조절 가능)"""
+    async def _start_streaming(self, websocket, fps: int, quality: int,
+                               codec: str = 'h264', keyframe_interval: int = 60):
+        """화면 스트리밍 시작 (MJPEG 또는 H.264)
+
+        v2.0.2: H.264 코덱 지원 + 코덱 협상
+        """
         self._streaming = True
         self._stream_fps = max(1, min(60, fps))
         self._stream_quality = max(10, min(100, quality))
-        logger.info(f"스트리밍 시작: {self._stream_fps}fps, Q={self._stream_quality}")
+
+        # 코덱 결정: H.264 요청 시 인코더 초기화 시도
+        actual_codec = 'mjpeg'
+        encoder_name = ''
+
+        if codec == 'h264' and H264_AVAILABLE and H264Encoder:
+            try:
+                screen_w, screen_h = self.screen_capture.screen_size
+                self._h264_encoder = H264Encoder(
+                    width=screen_w, height=screen_h,
+                    fps=self._stream_fps,
+                    quality=self._stream_quality,
+                    gop_size=keyframe_interval,
+                )
+                actual_codec = 'h264'
+                encoder_name = self._h264_encoder.encoder_name
+                self._stream_codec = 'h264'
+                logger.info(f"H.264 인코더 활성화: {encoder_name}")
+            except Exception as e:
+                logger.warning(f"H.264 인코더 초기화 실패, MJPEG 폴백: {e}")
+                self._h264_encoder = None
+                self._stream_codec = 'mjpeg'
+        else:
+            self._stream_codec = 'mjpeg'
+            if codec == 'h264':
+                logger.info("H.264 미지원 환경 — MJPEG 폴백")
+
+        # stream_started 응답 (코덱 협상)
+        screen_w, screen_h = self.screen_capture.screen_size
+        await websocket.send(json.dumps({
+            'type': 'stream_started',
+            'codec': actual_codec,
+            'encoder': encoder_name,
+            'width': screen_w,
+            'height': screen_h,
+            'fps': self._stream_fps,
+            'quality': self._stream_quality,
+        }))
+
+        logger.info(
+            f"스트리밍 시작: {actual_codec} ({encoder_name or 'jpeg'}), "
+            f"{self._stream_fps}fps, Q={self._stream_quality}"
+        )
 
         try:
-            while self._streaming and self._running:
-                jpeg_data = self.screen_capture.capture_jpeg(
-                    quality=self._stream_quality,
-                )
-                await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
-                interval = 1.0 / max(1, self._stream_fps)
-                await asyncio.sleep(interval)
+            if actual_codec == 'h264':
+                await self._stream_h264(websocket)
+            else:
+                await self._stream_mjpeg(websocket)
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception as e:
             logger.debug(f"스트리밍 오류: {e}")
         finally:
             self._streaming = False
+            if self._h264_encoder:
+                self._h264_encoder.close()
+                self._h264_encoder = None
             logger.info("스트리밍 중지")
+
+    async def _stream_mjpeg(self, websocket):
+        """MJPEG 스트리밍 루프 (기존 방식)"""
+        while self._streaming and self._running:
+            jpeg_data = self.screen_capture.capture_jpeg(
+                quality=self._stream_quality,
+            )
+            await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+            interval = 1.0 / max(1, self._stream_fps)
+            await asyncio.sleep(interval)
+
+    async def _stream_h264(self, websocket):
+        """H.264 스트리밍 루프 (v2.0.2)"""
+        while self._streaming and self._running:
+            # PIL Image 캡처 (JPEG 안 거침)
+            pil_image = self.screen_capture.capture_raw()
+            if pil_image is None:
+                await asyncio.sleep(0.1)
+                continue
+
+            # H.264 인코딩
+            packets = self._h264_encoder.encode_frame(pil_image)
+
+            for is_keyframe, nal_data in packets:
+                header = HEADER_H264_KEYFRAME if is_keyframe else HEADER_H264_DELTA
+                await websocket.send(bytes([header]) + nal_data)
+
+            interval = 1.0 / max(1, self._stream_fps)
+            await asyncio.sleep(interval)
 
     async def _execute_command(self, websocket, command: str):
         """원격 명령 실행"""

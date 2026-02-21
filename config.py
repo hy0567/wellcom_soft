@@ -89,6 +89,8 @@ class Settings:
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
             'stream_fps': 15,             # 전체 화면 스트리밍 FPS
             'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
+            'stream_codec': 'h264',       # 스트리밍 코덱: 'h264' 또는 'mjpeg' (v2.0.2)
+            'keyframe_interval': 60,      # H.264 키프레임 간격 (프레임 수, v2.0.2)
             'thumbnail_quality': 40,      # 썸네일 JPEG 품질
             'thumbnail_width': 320,       # 썸네일 최대 너비
         },

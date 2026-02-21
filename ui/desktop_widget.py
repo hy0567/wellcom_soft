@@ -22,6 +22,7 @@ from config import settings
 from core.pc_device import PCDevice
 from core.agent_server import AgentServer
 from core.multi_control import MultiControlManager
+from core.h264_decoder import H264Decoder, HEADER_H264_KEYFRAME, HEADER_H264_DELTA
 from ui.side_menu import SideMenu
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,12 @@ class RemoteScreenWidget(QWidget):
     def update_frame(self, jpeg_data: bytes):
         """JPEG 프레임 업데이트"""
         self._pixmap.loadFromData(QByteArray(jpeg_data))
+        self._rebuild_scaled()
+        self.update()
+
+    def update_frame_qimage(self, qimage):
+        """QImage 프레임 업데이트 (H.264 디코더용, v2.0.2)"""
+        self._pixmap = QPixmap.fromImage(qimage)
         self._rebuild_scaled()
         self.update()
 
@@ -201,6 +208,10 @@ class DesktopWidget(QMainWindow):
         self._current_target_fps = settings.get('screen.stream_fps', 15)
         self._is_stretch = False   # 화면 비율 모드
 
+        # v2.0.2 — H.264 디코더
+        self._h264_decoder: Optional[H264Decoder] = None
+        self._stream_codec = 'mjpeg'  # 실제 사용 코덱 ('mjpeg' 또는 'h264')
+
         self._init_ui()
         self._connect_signals()
         self._load_geometry()
@@ -210,11 +221,15 @@ class DesktopWidget(QMainWindow):
         self._fps_timer.timeout.connect(self._update_fps_display)
         self._fps_timer.start(1000)
 
-        # 스트리밍 시작
+        # 스트리밍 시작 (v2.0.2: H.264 코덱 협상)
+        preferred_codec = settings.get('screen.stream_codec', 'h264')
+        keyframe_interval = settings.get('screen.keyframe_interval', 60)
         self._server.start_streaming(
             pc.agent_id,
             fps=self._current_target_fps,
             quality=self._current_quality,
+            codec=preferred_codec,
+            keyframe_interval=keyframe_interval,
         )
 
         # 팝업 스타일: 독립 창으로 최상위에 활성화
@@ -301,12 +316,18 @@ class DesktopWidget(QMainWindow):
         self._quality_label.setStyleSheet(label_style)
         sb.addPermanentWidget(self._quality_label)
 
+        self._codec_label = QLabel("--")
+        self._codec_label.setStyleSheet(label_style)
+        sb.addPermanentWidget(self._codec_label)
+
         self._ratio_label = QLabel("Fit")
         self._ratio_label.setStyleSheet(label_style)
         sb.addPermanentWidget(self._ratio_label)
 
     def _connect_signals(self):
         self._server.screen_frame_received.connect(self._on_frame_received)
+        self._server.h264_frame_received.connect(self._on_h264_frame)
+        self._server.stream_started.connect(self._on_stream_started)
 
     def _load_geometry(self):
         """저장된 창 위치/크기 복원"""
@@ -341,6 +362,58 @@ class DesktopWidget(QMainWindow):
         pix = self._screen.current_pixmap
         if not pix.isNull():
             self._res_label.setText(f"{pix.width()} x {pix.height()}")
+
+    # ==================== 코덱 협상 (v2.0.2) ====================
+
+    def _on_stream_started(self, agent_id: str, info: dict):
+        """stream_started 응답 — 실제 코덱 확인 및 디코더 초기화"""
+        if agent_id != self._pc.agent_id:
+            return
+
+        codec = info.get('codec', 'mjpeg')
+        encoder = info.get('encoder', '')
+        self._stream_codec = codec
+
+        if codec == 'h264':
+            # H.264 디코더 초기화
+            self._h264_decoder = H264Decoder()
+            if self._h264_decoder.is_available:
+                logger.info(
+                    f"[{self._pc.name}] H.264 스트리밍 (인코더: {encoder})"
+                )
+                self._codec_label.setText(f"H.264 ({encoder})")
+            else:
+                logger.warning(
+                    f"[{self._pc.name}] H.264 디코더 불가 — MJPEG 프레임만 표시"
+                )
+                self._h264_decoder = None
+                self._stream_codec = 'mjpeg'
+                self._codec_label.setText("MJPEG")
+        else:
+            self._h264_decoder = None
+            logger.info(f"[{self._pc.name}] MJPEG 스트리밍")
+            self._codec_label.setText("MJPEG")
+
+    # ==================== H.264 프레임 수신 (v2.0.2) ====================
+
+    def _on_h264_frame(self, agent_id: str, header: int, raw_data: bytes):
+        """H.264 프레임 수신 → 디코딩 → QImage 렌더링"""
+        if agent_id != self._pc.agent_id:
+            return
+
+        if not self._h264_decoder:
+            return
+
+        qimage = self._h264_decoder.decode_frame(header, raw_data)
+        if qimage:
+            self._screen.update_frame_qimage(qimage)
+            self._frame_count += 1
+
+            # 해상도 표시 갱신
+            self._res_label.setText(f"{qimage.width()} x {qimage.height()}")
+        elif self._h264_decoder.waiting_for_keyframe:
+            # 키프레임 대기 중 — 에이전트에 요청
+            self._server.request_keyframe(self._pc.agent_id)
 
     # ==================== FPS 표시 ====================
 
@@ -637,9 +710,22 @@ class DesktopWidget(QMainWindow):
         # 스트리밍 중지
         self._server.stop_streaming(self._pc.agent_id)
 
+        # H.264 디코더 정리 (v2.0.2)
+        if self._h264_decoder:
+            self._h264_decoder.close()
+            self._h264_decoder = None
+
         # 시그널 해제
         try:
             self._server.screen_frame_received.disconnect(self._on_frame_received)
+        except TypeError:
+            pass
+        try:
+            self._server.h264_frame_received.disconnect(self._on_h264_frame)
+        except TypeError:
+            pass
+        try:
+            self._server.stream_started.disconnect(self._on_stream_started)
         except TypeError:
             pass
 

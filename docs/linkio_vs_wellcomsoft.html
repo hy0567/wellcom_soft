@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LinkIO Desktop vs WellcomSOFT 비교</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 32px;
+    line-height: 1.6;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    color: #58a6ff;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #8b949e;
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 18px;
+    color: #58a6ff;
+    margin: 32px 0 12px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #21262d;
+  }
+  h2 .num {
+    display: inline-block;
+    background: #1f6feb;
+    color: #fff;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 26px;
+    font-size: 13px;
+    margin-right: 8px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 24px;
+    font-size: 13.5px;
+  }
+  thead th {
+    background: #161b22;
+    color: #58a6ff;
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid #30363d;
+    position: sticky;
+    top: 0;
+  }
+  thead th:first-child { width: 200px; }
+  thead th:nth-child(2),
+  thead th:nth-child(3) { width: calc((100% - 200px) / 2); }
+  tbody tr { border-bottom: 1px solid #21262d; }
+  tbody tr:hover { background: #161b22; }
+  tbody td {
+    padding: 8px 14px;
+    vertical-align: top;
+  }
+  tbody td:first-child {
+    font-weight: 600;
+    color: #e6edf3;
+    white-space: nowrap;
+  }
+  .yes { color: #3fb950; }
+  .no  { color: #f85149; }
+  .new {
+    background: #1a3a1a;
+    color: #3fb950;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .na {
+    color: #8b949e;
+    font-style: italic;
+  }
+  .win {
+    background: #0d2340;
+    color: #58a6ff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .warn {
+    background: #3d2b00;
+    color: #d29922;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  /* 우위 섹션 */
+  .advantage-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .advantage-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .advantage-card h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  .advantage-card.linkio { border-left: 3px solid #f85149; }
+  .advantage-card.linkio h3 { color: #f85149; }
+  .advantage-card.wellcom { border-left: 3px solid #3fb950; }
+  .advantage-card.wellcom h3 { color: #3fb950; }
+  .advantage-card ul {
+    list-style: none;
+    padding: 0;
+    font-size: 13px;
+  }
+  .advantage-card li {
+    padding: 3px 0;
+    color: #8b949e;
+  }
+  .advantage-card li::before {
+    content: '•';
+    margin-right: 8px;
+    color: inherit;
+  }
+
+  /* 우선순위 테이블 */
+  .priority-high { color: #f85149; font-weight: 700; }
+  .priority-mid  { color: #d29922; font-weight: 700; }
+  .priority-low  { color: #3fb950; font-weight: 700; }
+
+  @media print {
+    body { background: #fff; color: #222; padding: 16px; }
+    thead th { background: #f0f0f0; color: #333; border-bottom: 2px solid #999; }
+    tbody tr { border-bottom: 1px solid #ddd; }
+    tbody tr:hover { background: transparent; }
+    h1, h2 { color: #1a5fb4; }
+    .subtitle { color: #666; }
+  }
+</style>
+</head>
+<body>
+
+<h1>LinkIO Desktop vs WellcomSOFT</h1>
+<p class="subtitle">분석일: 2025-02-22 &nbsp;|&nbsp; LinkIO v1.5.9 (v2 exe) &nbsp;|&nbsp; WellcomSOFT v2.0.1</p>
+
+<!-- ========== 1. 기술 스택 ========== -->
+<h2><span class="num">1</span>기술 스택</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>언어</td><td>C++ (네이티브 바이너리)</td><td>Python 3.x (PyInstaller)</td></tr>
+<tr><td>UI 프레임워크</td><td>Qt5 (Widgets / Svg / Network)</td><td>PyQt6</td></tr>
+<tr><td>비디오 코덱</td><td><strong>FFmpeg H.264</strong> (avcodec-60)</td><td>MJPEG (mss → JPEG)</td></tr>
+<tr><td>비디오 렌더링</td><td><strong>SDL2</strong> (하드웨어 가속)</td><td>QPainter (소프트웨어)</td></tr>
+<tr><td>이미지 인식</td><td>OpenCV 4.10</td><td class="na">미구현</td></tr>
+<tr><td>디바이스 대상</td><td><strong>안드로이드</strong> (scrcpy + ADB)</td><td><strong>Windows PC</strong> (pynput + mss)</td></tr>
+<tr><td>암호화</td><td>OpenSSL 1.1 + 3.x</td><td>HTTPS / WSS</td></tr>
+<tr><td>HTTP 라이브러리</td><td>libcurl (C)</td><td>requests (Python)</td></tr>
+<tr><td>JSON 파서</td><td>nlohmann/json (C++)</td><td>json 내장 모듈</td></tr>
+<tr><td>압축</td><td>zlib + miniz</td><td>zipfile 내장</td></tr>
+<tr><td>미러링 프로세스</td><td><strong>mirror.exe</strong> (별도 프로세스)</td><td>같은 프로세스 내 QWidget</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 2. 네트워크 / 연결 ========== -->
+<h2><span class="num">2</span>네트워크 / 연결</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>통신 프로토콜</td><td>Qt5WebSockets</td><td>websockets (Python)</td></tr>
+<tr><td>포트</td><td><strong>21350</strong></td><td><strong>4797</strong></td></tr>
+<tr><td>인증</td><td>sessionId 토큰 (16자 XXXX-XXXX-XXXX-XXXX)</td><td>JWT 토큰</td></tr>
+<tr><td>IP 구조</td><td>Ip1(공인) + Ip2(사설) 이중</td><td>서버 1개 URL</td></tr>
+<tr><td>원격 접속</td><td>포트포워딩 필요</td><td><span class="win">우위</span> <strong>서버 WS 릴레이</strong> (포트포워딩 불필요)</td></tr>
+<tr><td>자동 재연결</td><td class="yes">✅</td><td class="yes">✅</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 3. 미러링 성능 ========== -->
+<h2><span class="num">3</span>미러링 성능</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>기본 FPS</td><td><strong>60fps</strong></td><td>15fps</td></tr>
+<tr><td>최대 비트레이트</td><td><strong>8 Mbps</strong> (H.264)</td><td>~5 Mbps (MJPEG 추정)</td></tr>
+<tr><td>기본 해상도</td><td><strong>1080p</strong></td><td>원본 해상도</td></tr>
+<tr><td>프로필 수</td><td>2세트 (고화질/저화질)</td><td>1세트</td></tr>
+<tr><td>FPS 실시간 조절</td><td class="na">설정창에서만 변경</td><td><span class="win">우위</span> <span class="new">v2.0.1</span> 버튼 ±5</td></tr>
+<tr><td>화질 실시간 조절</td><td class="na">설정창에서만 변경</td><td><span class="win">우위</span> <span class="new">v2.0.1</span> 버튼 ±10</td></tr>
+<tr><td>오디오 전송</td><td class="yes">✅ (soundMute 토글)</td><td class="no">❌</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 4. 뷰어 (DesktopWidget) ========== -->
+<h2><span class="num">4</span>뷰어 (DesktopWidget)</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>창 방식</td><td><strong>독립 프로세스</strong> (mirror.exe)</td><td>독립 QMainWindow</td></tr>
+<tr><td>사이드 메뉴</td><td class="yes">✅ (ON/OFF, 볼륨 포함)</td><td class="yes">✅ (8개 새 버튼 v2.0.1)</td></tr>
+<tr><td>전체화면</td><td class="yes">✅</td><td class="yes">✅</td></tr>
+<tr><td>전체화면 PC 전환</td><td class="yes">✅ ←→ 방향키</td><td class="yes">✅ ←→ 방향키</td></tr>
+<tr><td>상태바</td><td class="no">❌</td><td><span class="win">우위</span> <span class="new">v2.0.1</span> FPS/해상도/화질/비율</td></tr>
+<tr><td>화면 비율 토글</td><td>aspectRatio 설정</td><td><span class="new">v2.0.1</span> Fit / Stretch</td></tr>
+<tr><td>특수키 전송</td><td class="na">안드로이드 대상 아님</td><td><span class="win">우위</span> <span class="new">v2.0.1</span> Ctrl+Alt+Del / Alt+Tab / Win</td></tr>
+<tr><td>창 위치 저장</td><td class="yes">✅ (pos_save)</td><td class="yes">✅</td></tr>
+<tr><td>타이틀바 숨기기</td><td class="yes">✅</td><td class="no">❌</td></tr>
+<tr><td>핀치투줌</td><td class="yes">✅ (Ctrl+드래그)</td><td class="no">❌</td></tr>
+<tr><td>드래그앤드롭 설치</td><td class="yes">✅ (APK)</td><td class="na">PC 대상 — 해당없음</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 5. 메인 화면 (그리드) ========== -->
+<h2><span class="num">5</span>메인 화면 (그리드)</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>그리드 열 수</td><td><strong>5열</strong></td><td>5열</td></tr>
+<tr><td>셀 자동 조절</td><td class="yes">✅ (프로그램 크기 따라)</td><td class="yes">✅</td></tr>
+<tr><td>자동 정렬</td><td class="yes">✅ (한글 이름 지원)</td><td class="no">❌</td></tr>
+<tr><td>검색/필터</td><td class="no">❌</td><td class="no">❌ <span class="warn">Batch 2</span></td></tr>
+<tr><td>썸네일 슬라이더</td><td class="no">❌</td><td class="no">❌ <span class="warn">Batch 2</span></td></tr>
+<tr><td>온/오프라인 필터</td><td class="no">❌</td><td class="no">❌ <span class="warn">Batch 2</span></td></tr>
+<tr><td>메모 필드</td><td class="yes">✅</td><td class="no">❌</td></tr>
+<tr><td>연결 상태 색상</td><td class="yes">✅ (v1.3.22)</td><td class="yes">✅</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 6. 멀티컨트롤 ========== -->
+<h2><span class="num">6</span>멀티컨트롤</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>멀컨 모드</td><td class="yes">✅ (Ctrl+1)</td><td class="yes">✅</td></tr>
+<tr><td>그룹 컨트롤</td><td class="yes">✅ (Ctrl+2, 우클릭)</td><td class="no">❌</td></tr>
+<tr><td>랜덤 딜레이</td><td class="yes">✅ 300~2000ms</td><td class="yes">✅</td></tr>
+<tr><td>랜덤 좌표 X/Y</td><td class="yes">✅ 개별 설정 (X=3, Y=3)</td><td class="yes">✅</td></tr>
+<tr><td>단축키 매핑</td><td class="yes">✅ 17~20개 키 바인딩</td><td class="no">❌</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 7. 자동화 / 스크립트 ========== -->
+<h2><span class="num">7</span>자동화 / 스크립트</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>스크립트 엔진</td><td class="yes">✅ (LinkIO_Editor.exe)</td><td class="no">❌</td></tr>
+<tr><td>이미지 인식</td><td class="yes">✅ OpenCV (정확도 설정)</td><td class="no">❌</td></tr>
+<tr><td>녹화/매크로</td><td class="yes">✅ (키보드+키매핑 녹화)</td><td class="no">❌</td></tr>
+<tr><td>키매핑</td><td class="yes">✅</td><td class="no">❌</td></tr>
+<tr><td>게이지 감지</td><td class="yes">✅ (임계값 설정)</td><td class="no">❌</td></tr>
+<tr><td>조건문/반복문</td><td class="yes">✅ (if/else, 루프, 탈출)</td><td class="no">❌</td></tr>
+<tr><td>스케줄 실행</td><td class="yes">✅ (시간 비교/저장)</td><td class="no">❌</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 8. 시스템 / 기타 ========== -->
+<h2><span class="num">8</span>시스템 / 기타</h2>
+<table>
+<thead><tr><th>항목</th><th>LinkIO Desktop</th><th>WellcomSOFT</th></tr></thead>
+<tbody>
+<tr><td>자동 업데이트</td><td class="yes">✅ (autoupdate.exe)</td><td class="yes">✅ (GitHub Release)</td></tr>
+<tr><td>트레이 아이콘</td><td class="yes">✅</td><td class="yes">✅</td></tr>
+<tr><td>테마</td><td class="yes">light / dark 지원</td><td class="no">❌</td></tr>
+<tr><td>등록 PC 수</td><td><strong>54대</strong> (list.json)</td><td>1대 (테스트)</td></tr>
+<tr><td>설치 크기</td><td>~140MB (DLL 포함)</td><td>~55MB (PyInstaller)</td></tr>
+<tr><td>크래시 격리</td><td class="yes">✅ (mirror.exe 별도)</td><td class="no">❌ (같은 프로세스)</td></tr>
+<tr><td>클립보드</td><td class="yes">✅ 폰→PC 복사</td><td class="yes">✅ 양방향</td></tr>
+<tr><td>파일 전송</td><td class="yes">✅ (드래그앤드롭)</td><td class="yes">✅</td></tr>
+</tbody>
+</table>
+
+<!-- ========== 우위 비교 ========== -->
+<h2><span class="num">9</span>각각의 우위</h2>
+<div class="advantage-grid">
+  <div class="advantage-card linkio">
+    <h3>LinkIO Desktop 우위</h3>
+    <ul>
+      <li>H.264 코덱 — 동일 화질에서 대역폭 1/10</li>
+      <li>SDL2 하드웨어 가속 렌더링</li>
+      <li>C++ 네이티브 성능</li>
+      <li>mirror.exe 별도 프로세스 (크래시 격리)</li>
+      <li>오디오 전송 (soundMute 토글)</li>
+      <li>스크립트 엔진 (OpenCV 이미지 인식, 조건문, 반복문)</li>
+      <li>녹화/매크로 + 키매핑</li>
+      <li>그룹 컨트롤 (Ctrl+2)</li>
+      <li>타이틀바 숨기기, 핀치투줌</li>
+      <li>다크/라이트 테마</li>
+    </ul>
+  </div>
+  <div class="advantage-card wellcom">
+    <h3>WellcomSOFT 우위</h3>
+    <ul>
+      <li>서버 WS 릴레이 — 포트포워딩 불필요</li>
+      <li>실시간 FPS/화질 조절 (뷰어 버튼)</li>
+      <li>상태바 — FPS/해상도/화질/비율 실시간 표시</li>
+      <li>특수키 전송 — Ctrl+Alt+Del, Alt+Tab, Win</li>
+      <li>Windows PC 네이티브 원격 제어</li>
+      <li>양방향 클립보드 동기화</li>
+      <li>설치 크기 1/3 (~55MB vs ~140MB)</li>
+      <li>JWT 기반 보안 인증</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ========== 향후 개선 우선순위 ========== -->
+<h2><span class="num">10</span>향후 개선 우선순위</h2>
+<table>
+<thead><tr><th>순위</th><th>항목</th><th>현재 상태</th><th>목표</th></tr></thead>
+<tbody>
+<tr><td><span class="priority-high">🔴 1</span></td><td>H.264 코덱 도입</td><td>MJPEG ~5Mbps</td><td>H.264 ~1Mbps (동일 화질)</td></tr>
+<tr><td><span class="priority-high">🔴 2</span></td><td>미러링 프로세스 분리</td><td>같은 프로세스</td><td>별도 프로세스 (크래시 격리)</td></tr>
+<tr><td><span class="priority-mid">🟠 3</span></td><td>오디오 전송</td><td>없음</td><td>원격 오디오 스트리밍</td></tr>
+<tr><td><span class="priority-mid">🟠 4</span></td><td>그룹 컨트롤</td><td>없음</td><td>멀컨 그룹 지정</td></tr>
+<tr><td><span class="priority-low">🟡 5</span></td><td>테마 (다크/라이트)</td><td>없음</td><td>테마 전환 지원</td></tr>
+<tr><td><span class="priority-low">🟡 6</span></td><td>메모 필드</td><td>없음</td><td>PC별 메모 저장</td></tr>
+<tr><td><span class="priority-low">🟢 7</span></td><td>자동 정렬</td><td>없음</td><td>이름순 정렬</td></tr>
+</tbody>
+</table>
+
+</body>
+</html>
