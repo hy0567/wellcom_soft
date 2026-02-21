@@ -271,14 +271,8 @@ class WellcomAgent:
 
     def _server_login(self) -> bool:
         """서버에 로그인 (토큰 저장 → 재시작 시 자동 로그인)"""
-        # API URL 보장 (항상 고정 서버 사용)
-        api_url = self.config.api_url
-        if not api_url:
-            api_url = self.DEFAULT_API_URL
-            self.config.set('api_url', api_url)
-        elif not api_url.startswith(('http://', 'https://')):
-            api_url = 'http://' + api_url
-            self.config.set('api_url', api_url)
+        # 항상 기본 서버 URL 강제 적용 (IP 직접 입력 등 이전 설정 무시)
+        self.config.set('api_url', self.DEFAULT_API_URL)
 
         self.api_client = AgentAPIClient(self.config)
 
