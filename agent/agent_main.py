@@ -245,9 +245,12 @@ class WellcomAgent:
             'mac_address': self._mac_address,
         }
 
+    # 서버 API URL (고정)
+    DEFAULT_API_URL = "http://log.wellcomll.org:4797"
+
     @staticmethod
-    def _ask_login_info() -> tuple:
-        """GUI 입력창으로 서버 로그인 정보 입력받기"""
+    def _ask_credentials() -> tuple:
+        """GUI 입력창으로 사용자 이름/비밀번호만 입력받기"""
         try:
             import tkinter as tk
             from tkinter import simpledialog
@@ -256,22 +259,6 @@ class WellcomAgent:
             root.withdraw()
             root.attributes('-topmost', True)
 
-            api_url = simpledialog.askstring(
-                "WellcomAgent 서버 설정",
-                "서버 API 주소를 입력하세요:\n"
-                "(예: http://log.wellcomll.org:4797)",
-                parent=root,
-                initialvalue="http://log.wellcomll.org:4797",
-            )
-            if not api_url:
-                root.destroy()
-                return '', '', ''
-
-            # http:// 자동 보정
-            api_url = api_url.strip()
-            if api_url and not api_url.startswith(('http://', 'https://')):
-                api_url = 'http://' + api_url
-
             username = simpledialog.askstring(
                 "WellcomAgent 로그인",
                 "사용자 이름:",
@@ -279,7 +266,7 @@ class WellcomAgent:
             )
             if not username:
                 root.destroy()
-                return api_url.strip(), '', ''
+                return '', ''
 
             password = simpledialog.askstring(
                 "WellcomAgent 로그인",
@@ -288,30 +275,21 @@ class WellcomAgent:
                 show='*',
             )
             root.destroy()
-            return api_url.strip(), username.strip(), password or ''
+            return username.strip(), password or ''
         except Exception as e:
             logger.error(f"로그인 입력창 오류: {e}")
-            return '', '', ''
+            return '', ''
 
     def _server_login(self) -> bool:
         """서버에 로그인 (토큰 저장 → 재시작 시 자동 로그인)"""
+        # API URL 보장 (항상 고정 서버 사용)
         api_url = self.config.api_url
-
-        # http:// 자동 보정 (config에서 읽은 값)
-        if api_url and not api_url.startswith(('http://', 'https://')):
+        if not api_url:
+            api_url = self.DEFAULT_API_URL
+            self.config.set('api_url', api_url)
+        elif not api_url.startswith(('http://', 'https://')):
             api_url = 'http://' + api_url
             self.config.set('api_url', api_url)
-
-        # API URL이 없으면 입력 받기
-        if not api_url:
-            api_url, username, password = self._ask_login_info()
-            if not api_url:
-                return False
-            self.config.set('api_url', api_url)
-            if username and password:
-                self.api_client = AgentAPIClient(self.config)
-                return self.api_client.login(username, password)
-            return False
 
         self.api_client = AgentAPIClient(self.config)
 
@@ -320,8 +298,8 @@ class WellcomAgent:
             logger.info("저장된 토큰으로 인증 성공")
             return True
 
-        # 토큰 없거나 만료 → 로그인 정보 입력
-        _, username, password = self._ask_login_info()
+        # 토큰 없거나 만료 → 사용자 이름/비밀번호 입력
+        username, password = self._ask_credentials()
         if not username or not password:
             return False
 
