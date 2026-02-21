@@ -221,9 +221,9 @@ class DesktopWidget(QMainWindow):
         self._is_fullscreen = False
         self._normal_geometry = None
 
-        # 마우스 이동 이벤트 쓰로틀링 (서버 릴레이 고려)
+        # 마우스 이동 이벤트 쓰로틀링 (v2.1.1: 16ms=60fps로 부드럽게)
         self._last_mouse_move_time = 0.0
-        self._mouse_move_interval = 0.033  # ~30fps 마우스 이동 제한 (릴레이 최적)
+        self._mouse_move_interval = 0.016  # ~60fps 마우스 이동
 
         # v2.0.9 — 프레임 계측 개선 (누적 카운트 + FPS 측정 분리)
         self._fps_frame_count = 0    # FPS 계측용 (1초마다 리셋)

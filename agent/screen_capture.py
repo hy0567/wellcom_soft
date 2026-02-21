@@ -177,10 +177,12 @@ class ScreenCapture:
             if scale < 1.0:
                 new_w = int(img.width * scale)
                 new_h = int(img.height * scale)
-                img = img.resize((new_w, new_h), Image.LANCZOS)
+                # v2.1.1: BILINEAR (LANCZOS 대비 2-3배 빠름, 스트리밍에 충분)
+                img = img.resize((new_w, new_h), Image.BILINEAR)
 
             buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=quality, optimize=True)
+            # v2.1.1: optimize=False (CPU 절감, 스트리밍 속도 우선)
+            img.save(buf, format='JPEG', quality=quality)
             return buf.getvalue()
 
         except Exception as e:

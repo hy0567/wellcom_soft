@@ -726,13 +726,17 @@ class WellcomAgent:
     async def _stream_mjpeg(self, websocket):
         """MJPEG 스트리밍 루프
 
-        서버 릴레이 대역폭을 고려하여 적절한 해상도 스케일링.
-        에러 복구 포함. v2.0.9: 프레임 타이밍 보정 + 디버그 로그
+        v2.1.1: 대폭 최적화 — 캡처/전송 파이프라인 분리, 적응형 FPS
+        서버 릴레이 RTT로 인한 FPS 저하 문제 해결:
+        - websocket.send()가 RTT만큼 블로킹 → 캡처와 독립적으로 전송
+        - 프레임 큐로 최신 프레임만 전송 (낡은 프레임 자동 드롭)
         """
         screen_w, screen_h = self.screen_capture.screen_size
-        # 1080p 이상이면 720p로 다운스케일 (대역폭 최적화)
-        if screen_w > 1280:
+        # 해상도 스케일링
+        if screen_w > 1920:
             scale = 1280 / screen_w
+        elif screen_w > 1280:
+            scale = 1280 / screen_w  # 1080p→720p
         else:
             scale = 1.0
 
@@ -740,59 +744,125 @@ class WellcomAgent:
                      f"→ scale={scale:.2f}, Q={self._stream_quality}, "
                      f"target={self._stream_fps}fps")
 
-        consecutive_errors = 0
-        frame_count = 0
-        fps_start = time.time()
-        target_interval = 1.0 / max(1, self._stream_fps)
-        next_frame_time = time.time()
+        # 프레임 큐: 캡처 루프가 넣고, 전송 루프가 꺼냄
+        # maxsize=2: 최신 2프레임만 유지 (낡은 프레임 자동 드롭)
+        frame_queue = asyncio.Queue(maxsize=2)
+        send_done = asyncio.Event()
 
-        while self._streaming and self._running:
-            try:
-                now = time.time()
-                # 프레임 타이밍 보정: sleep 대신 목표 시간까지 대기
-                wait_time = next_frame_time - now
-                if wait_time > 0.001:
-                    await asyncio.sleep(wait_time)
+        async def _capture_loop():
+            """캡처 루프 — 타이머 기반으로 프레임 생성"""
+            consecutive_errors = 0
+            target_interval = 1.0 / max(1, self._stream_fps)
+            next_frame_time = time.time()
 
-                capture_start = time.time()
-                jpeg_data = self.screen_capture.capture_jpeg(
-                    quality=self._stream_quality,
-                    scale=scale,
-                )
-                if jpeg_data:
-                    await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
-                    consecutive_errors = 0
-                    frame_count += 1
+            while self._streaming and self._running:
+                try:
+                    now = time.time()
+                    wait_time = next_frame_time - now
+                    if wait_time > 0.001:
+                        await asyncio.sleep(wait_time)
 
-                    # 다음 프레임 목표 시간 계산 (누적 보정)
+                    jpeg_data = self.screen_capture.capture_jpeg(
+                        quality=self._stream_quality,
+                        scale=scale,
+                    )
+                    if jpeg_data:
+                        # 큐가 가득 차면 오래된 프레임 버리고 새 프레임 넣기
+                        if frame_queue.full():
+                            try:
+                                frame_queue.get_nowait()  # 오래된 프레임 드롭
+                            except asyncio.QueueEmpty:
+                                pass
+                        await frame_queue.put(jpeg_data)
+                        consecutive_errors = 0
+                    else:
+                        consecutive_errors += 1
+
                     target_interval = 1.0 / max(1, self._stream_fps)
                     next_frame_time = time.time() + target_interval
+
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 10:
+                        logger.warning("MJPEG 캡처 연속 에러 10회 — 중단")
+                        return
+                    await asyncio.sleep(0.05)
+
+            send_done.set()
+
+        async def _send_loop():
+            """전송 루프 — 큐에서 프레임 꺼내서 WS 전송"""
+            frame_count = 0
+            total_bytes = 0
+            fps_start = time.time()
+
+            while self._streaming and self._running:
+                try:
+                    # 최대 0.2초 대기 (캡처 루프가 느려도 반응)
+                    try:
+                        jpeg_data = await asyncio.wait_for(
+                            frame_queue.get(), timeout=0.2
+                        )
+                    except asyncio.TimeoutError:
+                        if send_done.is_set():
+                            return
+                        continue
+
+                    await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                    frame_count += 1
+                    total_bytes += len(jpeg_data)
 
                     # 5초마다 FPS 로그
                     elapsed = time.time() - fps_start
                     if elapsed >= 5.0:
                         actual_fps = frame_count / elapsed
-                        capture_ms = (time.time() - capture_start) * 1000
+                        avg_size = total_bytes / frame_count if frame_count else 0
+                        bandwidth_kbps = (total_bytes * 8) / (elapsed * 1000)
+                        q_size = frame_queue.qsize()
                         logger.info(
                             f"MJPEG: {actual_fps:.1f}fps (목표 {self._stream_fps}), "
-                            f"프레임크기={len(jpeg_data)}B, "
-                            f"캡처+전송={capture_ms:.0f}ms"
+                            f"평균={avg_size/1024:.1f}KB, "
+                            f"BW={bandwidth_kbps:.0f}kbps, "
+                            f"큐={q_size}"
                         )
                         frame_count = 0
+                        total_bytes = 0
                         fps_start = time.time()
-                else:
-                    next_frame_time = time.time() + target_interval
 
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"MJPEG 스트리밍 중단 — WS 연결 종료 (프레임 #{frame_count})")
-                raise
-            except Exception as e:
-                consecutive_errors += 1
-                logger.debug(f"MJPEG 프레임 전송 오류: {e}")
-                if consecutive_errors >= 10:
-                    logger.warning("MJPEG 연속 에러 10회 — 스트리밍 중단")
-                    break
-                next_frame_time = time.time() + 0.1
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info(f"MJPEG 전송 중단 — WS 연결 종료 (프레임 #{frame_count})")
+                    raise
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    logger.debug(f"MJPEG 전송 오류: {e}")
+                    await asyncio.sleep(0.05)
+
+        # 캡처+전송을 동시 실행
+        capture_task = asyncio.create_task(_capture_loop())
+        send_task = asyncio.create_task(_send_loop())
+        try:
+            # 둘 중 하나라도 끝나면 다른 것도 취소
+            done, pending = await asyncio.wait(
+                [capture_task, send_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # 완료된 태스크에서 예외 전파
+            for task in done:
+                if task.exception():
+                    raise task.exception()
+        except websockets.exceptions.ConnectionClosed:
+            raise
+        except asyncio.CancelledError:
+            pass
 
     async def _stream_h264(self, websocket):
         """H.264 스트리밍 루프 (v2.0.2)"""
