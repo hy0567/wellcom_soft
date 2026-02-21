@@ -227,44 +227,24 @@ def main():
     if not check_for_updates(app):
         return
 
-    # WS 서버 시작 (매니저 = WS 서버, 에이전트가 접속해옴)
+    # 서버 WS 릴레이에 접속 (매니저 = WS 클라이언트, 서버가 에이전트와 중계)
     from core.agent_server import AgentServer
-    agent_port = settings.get('agent_server.port', 4797)
-    agent_server = AgentServer(port=agent_port)
-    agent_server.start_server()
-    logger.info(f"WS 서버 시작 (포트 {agent_port}, 에이전트 접속 대기)")
-
-    # 서버에 매니저 IP 등록 (에이전트가 조회하여 접속)
     from api_client import api_client as _api
-    try:
-        import socket as _sock
-        _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-        _s.connect(('8.8.8.8', 80))
-        _local_ip = _s.getsockname()[0]
-        _s.close()
-        _api.register_manager(ip=_local_ip, ws_port=agent_port)
-        logger.info(f"매니저 IP 등록: {_local_ip}:{agent_port}")
-    except Exception as e:
-        logger.warning(f"매니저 IP 등록 실패: {e}")
+    agent_server = AgentServer()
+
+    # 서버 API URL과 JWT 토큰으로 WS 릴레이 접속
+    _server_url = _api._base_url
+    _token = _api.token
+    agent_server.start_connection(_server_url, _token)
+    logger.info(f"서버 WS 릴레이 접속 (포트포워딩 불필요)")
 
     # PC 매니저 초기화
     from core.pc_manager import PCManager
     pc_manager = PCManager(agent_server)
 
-    # 서버에서 에이전트 목록 동기화 (WS 연결은 에이전트가 접속해옴)
+    # 서버에서 에이전트 목록 동기화
     pc_manager.load_from_server()
     logger.info("서버에서 에이전트 목록 동기화 완료")
-
-    # 매니저 하트비트 타이머 (30초마다)
-    from PyQt6.QtCore import QTimer
-    _heartbeat_timer = QTimer()
-    def _mgr_heartbeat():
-        try:
-            _api.send_manager_heartbeat(ip=_local_ip)
-        except Exception:
-            pass
-    _heartbeat_timer.timeout.connect(_mgr_heartbeat)
-    _heartbeat_timer.start(30000)
 
     # 메인 윈도우
     from ui.main_window import MainWindow
@@ -277,10 +257,9 @@ def main():
     exit_code = app.exec()
 
     # 정리
-    _heartbeat_timer.stop()
     from api_client import api_client
     api_client.logout()
-    agent_server.stop_server()
+    agent_server.stop_connection()
     logger.info("WellcomSOFT 종료")
 
     sys.exit(exit_code)

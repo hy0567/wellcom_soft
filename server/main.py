@@ -1,24 +1,29 @@
 """
 WellcomSOFT API 서버
-FastAPI + MySQL + JWT 인증
+FastAPI + MySQL + JWT 인증 + WebSocket 릴레이
 
 핵심 흐름:
 1. 에이전트(대상PC)가 서버에 로그인 → JWT 토큰 획득
 2. 에이전트가 /api/agents/register로 자신을 등록 (owner_id = 로그인 사용자)
-3. 에이전트가 /api/agents/heartbeat로 주기적으로 상태 보고
-4. 매니저(관리PC)가 같은 계정으로 로그인 → /api/agents로 해당 사용자의 에이전트 목록 조회
-5. 매니저가 에이전트의 IP를 알아내서 WebSocket 직접 연결
+3. 매니저(관리PC)가 같은 계정으로 로그인 → /ws/manager?token=JWT 로 WS 접속
+4. 에이전트가 /ws/agent?token=JWT 로 WS 접속
+5. 서버가 같은 owner_id의 매니저↔에이전트 간 메시지를 양방향 릴레이
+6. 포트포워딩 불필요 — 매니저/에이전트 모두 서버에 접속
 """
 import os
+import json
+import asyncio
+import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.websockets import WebSocketState
 
 from auth import (
     hash_password, verify_password, create_token,
-    get_current_user, require_admin,
+    get_current_user, require_admin, decode_token,
 )
 from database import get_db
 from models import (
@@ -28,6 +33,8 @@ from models import (
     GroupCreate, GroupResponse,
     ManagerRegister, ManagerHeartbeat, ManagerResponse,
 )
+
+logger = logging.getLogger("ws_relay")
 
 app = FastAPI(title="WellcomSOFT API", version="1.0.0")
 
@@ -544,9 +551,272 @@ def _user_to_response(user: dict) -> UserResponse:
 
 
 # ===========================================================
+# WebSocket 릴레이 (매니저 ↔ 서버 ↔ 에이전트)
+# ===========================================================
+
+# 인메모리 릴레이 상태
+_ws_managers: Dict[int, WebSocket] = {}                   # owner_id → 매니저 WS
+_ws_agents: Dict[int, Dict[str, WebSocket]] = {}          # owner_id → {agent_id: WS}
+_agent_owner_map: Dict[str, int] = {}                     # "owner_id:agent_id" → owner_id (역매핑)
+
+# agent_id를 32바이트로 패딩/언패딩
+AGENT_ID_LEN = 32
+
+
+def _pad_agent_id(agent_id: str) -> bytes:
+    """agent_id를 32바이트로 패딩"""
+    return agent_id.encode('utf-8')[:AGENT_ID_LEN].ljust(AGENT_ID_LEN, b'\x00')
+
+
+def _unpad_agent_id(data: bytes) -> str:
+    """32바이트에서 agent_id 추출"""
+    return data[:AGENT_ID_LEN].rstrip(b'\x00').decode('utf-8', errors='replace')
+
+
+def _verify_ws_token(token: str) -> dict:
+    """WebSocket용 JWT 토큰 검증 (query param)"""
+    try:
+        payload = decode_token(token)
+        owner_id = payload.get("sub")
+        username = payload.get("username", "")
+        if not owner_id:
+            return {}
+        return {"id": owner_id, "username": username, "role": payload.get("role", "user")}
+    except Exception:
+        return {}
+
+
+@app.websocket("/ws/manager")
+async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
+    """매니저 WS 접속 — JWT 인증 후 메시지 릴레이
+
+    매니저가 보내는 메시지:
+      - JSON: {"type": "...", "target_agent": "DESKTOP-ABC", ...}
+        → target_agent 추출 → 해당 에이전트에 target_agent 제거 후 전달
+      - Binary: agent_id(32바이트) + 원본 데이터
+        → agent_id 추출 → 해당 에이전트에 원본 데이터 전달
+    """
+    user = _verify_ws_token(token)
+    if not user:
+        await ws.close(code=4001, reason="Invalid token")
+        return
+
+    owner_id = user["id"]
+    await ws.accept()
+
+    # 기존 매니저 연결이 있으면 교체
+    old_ws = _ws_managers.get(owner_id)
+    if old_ws:
+        try:
+            await old_ws.close(code=4002, reason="Replaced by new connection")
+        except Exception:
+            pass
+
+    _ws_managers[owner_id] = ws
+    logger.info(f"[WS Relay] 매니저 접속: owner_id={owner_id} ({user['username']})")
+
+    # 이미 접속 중인 에이전트들의 auth 메시지를 매니저에 전달
+    if owner_id in _ws_agents:
+        for agent_id, agent_ws in _ws_agents[owner_id].items():
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "agent_connected",
+                    "source_agent": agent_id,
+                }))
+            except Exception:
+                pass
+
+    try:
+        while True:
+            message = await ws.receive()
+            msg_type = message.get("type")
+
+            if msg_type == "websocket.receive":
+                if "text" in message:
+                    # JSON 메시지 — target_agent로 라우팅
+                    raw = message["text"]
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    target_agent = data.pop("target_agent", None)
+                    if not target_agent:
+                        continue
+
+                    # 해당 에이전트에 전달
+                    agent_ws = _ws_agents.get(owner_id, {}).get(target_agent)
+                    if agent_ws:
+                        try:
+                            await agent_ws.send_text(json.dumps(data))
+                        except Exception:
+                            pass
+
+                elif "bytes" in message:
+                    # 바이너리 메시지 — 앞 32바이트 = agent_id
+                    raw_bytes = message["bytes"]
+                    if len(raw_bytes) <= AGENT_ID_LEN:
+                        continue
+
+                    target_agent = _unpad_agent_id(raw_bytes[:AGENT_ID_LEN])
+                    payload = raw_bytes[AGENT_ID_LEN:]
+
+                    agent_ws = _ws_agents.get(owner_id, {}).get(target_agent)
+                    if agent_ws:
+                        try:
+                            await agent_ws.send_bytes(payload)
+                        except Exception:
+                            pass
+
+            elif msg_type == "websocket.disconnect":
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"[WS Relay] 매니저 오류 (owner_id={owner_id}): {e}")
+    finally:
+        if _ws_managers.get(owner_id) is ws:
+            del _ws_managers[owner_id]
+        logger.info(f"[WS Relay] 매니저 해제: owner_id={owner_id}")
+
+
+@app.websocket("/ws/agent")
+async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
+    """에이전트 WS 접속 — JWT 인증 후 메시지 릴레이
+
+    에이전트가 보내는 메시지:
+      - 첫 메시지: {"type": "auth", "agent_id": "...", ...}
+        → agent_id 추출/저장, 매니저에 그대로 전달
+      - JSON: {"type": "clipboard", ...}
+        → source_agent 추가 후 매니저에 전달
+      - Binary: 0x01/0x02 + JPEG
+        → agent_id(32바이트) 프리픽스 붙여서 매니저에 전달
+    """
+    user = _verify_ws_token(token)
+    if not user:
+        await ws.close(code=4001, reason="Invalid token")
+        return
+
+    owner_id = user["id"]
+    await ws.accept()
+
+    agent_id = None
+
+    try:
+        # 첫 메시지: auth 핸드셰이크
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10)
+        auth_msg = json.loads(raw)
+
+        if auth_msg.get("type") != "auth":
+            await ws.close(code=4003, reason="Expected auth message")
+            return
+
+        agent_id = auth_msg.get("agent_id", "")
+        if not agent_id:
+            await ws.close(code=4003, reason="Missing agent_id")
+            return
+
+        # 에이전트 등록
+        if owner_id not in _ws_agents:
+            _ws_agents[owner_id] = {}
+
+        # 기존 같은 agent_id 연결이 있으면 교체
+        old_ws = _ws_agents[owner_id].get(agent_id)
+        if old_ws:
+            try:
+                await old_ws.close(code=4002, reason="Replaced")
+            except Exception:
+                pass
+
+        _ws_agents[owner_id][agent_id] = ws
+        logger.info(f"[WS Relay] 에이전트 접속: {agent_id} (owner_id={owner_id})")
+
+        # 에이전트에 auth_ok 응답
+        await ws.send_text(json.dumps({"type": "auth_ok"}))
+
+        # 매니저에 auth 메시지 전달 (agent_connected 트리거)
+        mgr_ws = _ws_managers.get(owner_id)
+        if mgr_ws:
+            auth_msg["source_agent"] = agent_id
+            try:
+                await mgr_ws.send_text(json.dumps(auth_msg))
+            except Exception:
+                pass
+
+        # 메시지 릴레이 루프
+        while True:
+            message = await ws.receive()
+            msg_type = message.get("type")
+
+            if msg_type == "websocket.receive":
+                mgr_ws = _ws_managers.get(owner_id)
+                if not mgr_ws:
+                    # 매니저 미접속 — 메시지 버림
+                    continue
+
+                if "text" in message:
+                    # JSON 메시지 — source_agent 추가 후 매니저에 전달
+                    raw_text = message["text"]
+                    try:
+                        data = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    data["source_agent"] = agent_id
+                    try:
+                        await mgr_ws.send_text(json.dumps(data))
+                    except Exception:
+                        pass
+
+                elif "bytes" in message:
+                    # 바이너리 메시지 — agent_id(32) 프리픽스 추가
+                    raw_bytes = message["bytes"]
+                    prefixed = _pad_agent_id(agent_id) + raw_bytes
+                    try:
+                        await mgr_ws.send_bytes(prefixed)
+                    except Exception:
+                        pass
+
+            elif msg_type == "websocket.disconnect":
+                break
+
+    except asyncio.TimeoutError:
+        logger.warning(f"[WS Relay] 에이전트 auth 타임아웃")
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"[WS Relay] 에이전트 오류 ({agent_id or 'unknown'}): {e}")
+    finally:
+        if agent_id and owner_id in _ws_agents:
+            if _ws_agents[owner_id].get(agent_id) is ws:
+                del _ws_agents[owner_id][agent_id]
+                if not _ws_agents[owner_id]:
+                    del _ws_agents[owner_id]
+
+            # 매니저에 disconnect 알림
+            mgr_ws = _ws_managers.get(owner_id)
+            if mgr_ws:
+                try:
+                    await mgr_ws.send_text(json.dumps({
+                        "type": "agent_disconnected",
+                        "source_agent": agent_id,
+                    }))
+                except Exception:
+                    pass
+
+        logger.info(f"[WS Relay] 에이전트 해제: {agent_id or 'unknown'} (owner_id={owner_id})")
+
+
+# ===========================================================
 # 실행
 # ===========================================================
 if __name__ == "__main__":
     import uvicorn
     from config import API_HOST, API_PORT
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    )
     uvicorn.run(app, host=API_HOST, port=API_PORT)

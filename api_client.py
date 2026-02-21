@@ -1,7 +1,7 @@
 """WellcomSOFT API 클라이언트
 
 매니저/에이전트 공통으로 사용하는 서버 통신 클라이언트.
-로그인 → 에이전트 등록/조회 → 하트비트
+로그인 → 에이전트 등록/조회 → JWT 토큰 제공 (WS 릴레이 접속용)
 """
 import logging
 import requests
@@ -179,28 +179,12 @@ class APIClient:
         except Exception:
             return False
 
-    # ==================== Manager 등록/조회 ====================
+    # ==================== Token 접근자 ====================
 
-    def register_manager(self, ip: str, ws_port: int = 4797) -> dict:
-        """매니저 자기 IP를 서버에 등록 (에이전트가 조회하여 WS 접속)"""
-        return self._post('/api/manager/register', {
-            'ip': ip,
-            'ws_port': ws_port,
-        })
-
-    def send_manager_heartbeat(self, ip: str = ''):
-        """매니저 하트비트"""
-        try:
-            self._post('/api/manager/heartbeat', {'ip': ip})
-        except Exception as e:
-            logger.debug(f"매니저 하트비트 실패: {e}")
-
-    def get_manager_info(self) -> Optional[dict]:
-        """같은 계정의 매니저 IP 조회 (에이전트용)"""
-        try:
-            return self._get('/api/manager')
-        except Exception:
-            return None
+    @property
+    def token(self) -> str:
+        """JWT 토큰 반환 (WS 릴레이 접속용)"""
+        return self._token
 
 
 # 싱글톤 인스턴스
