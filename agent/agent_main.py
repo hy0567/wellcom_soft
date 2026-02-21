@@ -254,6 +254,7 @@ class WellcomAgent:
         self._running = True
         self._streaming = False
         self._stream_task = None
+        self._thumbnail_push_task = None
         self._agent_id = socket.gethostname()
         self._local_ip = _get_local_ip()
         self._mac_address = _get_mac_address()
@@ -493,6 +494,9 @@ class WellcomAgent:
                 if self._stream_task:
                     self._stream_task.cancel()
                     self._stream_task = None
+                if self._thumbnail_push_task:
+                    self._thumbnail_push_task.cancel()
+                    self._thumbnail_push_task = None
 
             if self._running:
                 logger.info(f"서버 재접속 대기... ({reconnect_interval}초)")
@@ -506,13 +510,30 @@ class WellcomAgent:
             return
 
         msg_type = msg.get('type', '')
-        logger.info(f"명령 수신: type={msg_type}")
+        if msg_type not in ('ping', 'request_thumbnail', 'start_thumbnail_push'):
+            logger.info(f"명령 수신: type={msg_type}")
 
         if msg_type == 'ping':
             await websocket.send(json.dumps({'type': 'pong'}))
 
         elif msg_type == 'request_thumbnail':
             await self._send_thumbnail(websocket)
+
+        elif msg_type == 'start_thumbnail_push':
+            # 에이전트가 자동으로 주기적 썸네일 전송
+            interval = msg.get('interval', 1.0)
+            if self._thumbnail_push_task:
+                self._thumbnail_push_task.cancel()
+            self._thumbnail_push_task = asyncio.ensure_future(
+                self._thumbnail_push_loop(websocket, interval)
+            )
+            logger.info(f"썸네일 자동 전송 시작: {interval}초 간격")
+
+        elif msg_type == 'stop_thumbnail_push':
+            if self._thumbnail_push_task:
+                self._thumbnail_push_task.cancel()
+                self._thumbnail_push_task = None
+                logger.info("썸네일 자동 전송 중지")
 
         elif msg_type == 'start_stream':
             fps = msg.get('fps', self.config.screen_fps)
@@ -597,7 +618,6 @@ class WellcomAgent:
     async def _send_thumbnail(self, websocket):
         """썸네일 캡처 및 전송"""
         try:
-            logger.info("썸네일 캡처 시작...")
             jpeg_data = self.screen_capture.capture_thumbnail(
                 max_width=self.config.thumbnail_width,
                 quality=self.config.thumbnail_quality,
@@ -609,9 +629,8 @@ class WellcomAgent:
                     'error': 'capture returned empty data',
                 }))
                 return
-            logger.info(f"썸네일 캡처 완료: {len(jpeg_data)}B, 전송 중...")
             await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
-            logger.info(f"썸네일 전송 완료: {len(jpeg_data)}B")
+            logger.debug(f"썸네일 전송: {len(jpeg_data)}B")
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"썸네일 전송 실패: {error_msg}", exc_info=True)
@@ -623,6 +642,27 @@ class WellcomAgent:
                 }))
             except Exception:
                 pass
+
+    async def _thumbnail_push_loop(self, websocket, interval: float):
+        """주기적 썸네일 자동 전송 루프"""
+        try:
+            while self._running:
+                try:
+                    jpeg_data = self.screen_capture.capture_thumbnail(
+                        max_width=self.config.thumbnail_width,
+                        quality=self.config.thumbnail_quality,
+                    )
+                    if jpeg_data:
+                        await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
+                except Exception as e:
+                    logger.debug(f"썸네일 push 실패: {e}")
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            logger.info("썸네일 push 루프 종료")
 
     async def _stream_loop(self, websocket, fps: int, quality: int):
         """화면 스트리밍 루프"""

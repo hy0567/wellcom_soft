@@ -161,13 +161,30 @@ class AgentServer(QObject):
     # ==================== 에이전트에 명령 전송 ====================
 
     def request_thumbnail(self, agent_id: str):
-        """썸네일 요청"""
+        """썸네일 요청 (단일)"""
         if agent_id in self._connected_agents:
             logger.debug(f"[AgentServer] 썸네일 요청: {agent_id}")
         else:
             logger.warning(f"[AgentServer] 썸네일 요청 실패 — {agent_id} 미연결")
             return
         self._send_to_agent(agent_id, {'type': 'request_thumbnail'})
+
+    def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
+        """에이전트가 주기적으로 썸네일을 자동 전송하도록 요청"""
+        if agent_id not in self._connected_agents:
+            return
+        self._send_to_agent(agent_id, {
+            'type': 'start_thumbnail_push',
+            'interval': interval,
+        })
+        logger.info(f"[AgentServer] 썸네일 push 시작 요청: {agent_id}, {interval}초 간격")
+
+    def stop_thumbnail_push(self, agent_id: str):
+        """에이전트 썸네일 자동 전송 중지"""
+        if agent_id not in self._connected_agents:
+            return
+        self._send_to_agent(agent_id, {'type': 'stop_thumbnail_push'})
+        logger.info(f"[AgentServer] 썸네일 push 중지 요청: {agent_id}")
 
     def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
         """전체 화면 스트리밍 시작"""
@@ -385,17 +402,8 @@ class AgentServer(QObject):
                             break
                         msg_count += 1
                         if isinstance(message, str):
-                            # 메시지 타입 로그
-                            try:
-                                preview = json.loads(message)
-                                msg_type = preview.get('type', '?')
-                                source = preview.get('source_agent', '') or preview.get('agent_id', '')
-                                logger.info(f"[AgentServer] 수신 #{msg_count}: type={msg_type}, agent={source}")
-                            except Exception:
-                                logger.info(f"[AgentServer] 수신 #{msg_count}: text ({len(message)}B)")
                             self._handle_text_message(message)
                         elif isinstance(message, bytes):
-                            logger.info(f"[AgentServer] 수신 #{msg_count}: binary ({len(message)}B)")
                             self._handle_binary_message(message)
 
                     logger.info(f"[AgentServer] 메시지 루프 종료 (총 {msg_count}개 수신)")

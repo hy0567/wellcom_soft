@@ -657,7 +657,8 @@ async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
                     if agent_ws:
                         try:
                             await agent_ws.send_text(json.dumps(data))
-                            logger.info(f"[Relay M→A] type={msg_cmd} → {target_agent}")
+                            if msg_cmd not in ('request_thumbnail', 'start_thumbnail_push', 'ping'):
+                                logger.info(f"[Relay M→A] type={msg_cmd} → {target_agent}")
                         except Exception as e:
                             logger.warning(f"[Relay M→A] 전달 실패: {e}")
                     else:
@@ -774,35 +775,34 @@ async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
                     try:
                         data = json.loads(raw_text)
                     except json.JSONDecodeError:
-                        logger.warning(f"[Agent {agent_id}] #{agent_msg_count} JSON 파싱 실패")
                         continue
 
                     msg_cmd = data.get("type", "?")
-                    logger.info(f"[Agent {agent_id}] #{agent_msg_count} 수신: type={msg_cmd}")
 
                     if not mgr_ws:
-                        logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 메시지 버림: type={msg_cmd}")
+                        if agent_msg_count <= 3:
+                            logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 메시지 버림: type={msg_cmd}")
                         continue
 
                     data["source_agent"] = agent_id
                     try:
                         await mgr_ws.send_text(json.dumps(data))
-                        logger.info(f"[Relay A→M] type={msg_cmd} ← {agent_id}")
+                        if msg_cmd not in ('pong', 'thumbnail_error'):
+                            logger.debug(f"[Relay A→M] type={msg_cmd} ← {agent_id}")
                     except Exception as e:
                         logger.warning(f"[Relay A→M] 전달 실패: {e}")
 
                 elif "bytes" in message:
                     raw_bytes = message["bytes"]
-                    logger.info(f"[Agent {agent_id}] #{agent_msg_count} 수신: binary ({len(raw_bytes)}B), header=0x{raw_bytes[0]:02x}" if raw_bytes else f"[Agent {agent_id}] #{agent_msg_count} 수신: empty bytes")
+                    if not raw_bytes:
+                        continue
 
                     if not mgr_ws:
-                        logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 바이너리 버림")
                         continue
 
                     prefixed = _pad_agent_id(agent_id) + raw_bytes
                     try:
                         await mgr_ws.send_bytes(prefixed)
-                        logger.info(f"[Relay A→M] binary ({len(raw_bytes)}B) ← {agent_id}")
                     except Exception as e:
                         logger.warning(f"[Relay A→M] 바이너리 전달 실패: {e}")
 

@@ -86,10 +86,10 @@ class Settings:
             'max_connections': 200,
         },
         'screen': {
-            'thumbnail_interval': 3000,   # ms - 그리드 썸네일 갱신 간격
+            'thumbnail_interval': 1000,   # ms - 썸네일 push 간격 (에이전트 자동 전송)
             'stream_fps': 15,             # 전체 화면 스트리밍 FPS
             'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
-            'thumbnail_quality': 30,      # 썸네일 JPEG 품질
+            'thumbnail_quality': 40,      # 썸네일 JPEG 품질 (30→40 부드러움)
             'thumbnail_width': 320,       # 썸네일 최대 너비
         },
         'grid_view': {

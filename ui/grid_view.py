@@ -108,18 +108,21 @@ class GridView(QScrollArea):
         self._grid.setContentsMargins(6, 6, 6, 6)
         self.setWidget(self._container)
 
+        self._push_agents: set = set()  # push 모드 활성화된 에이전트
+
         # 시그널 연결
         pc_manager.signals.devices_reloaded.connect(self.rebuild_grid)
         pc_manager.signals.device_added.connect(lambda _: self.rebuild_grid())
         pc_manager.signals.device_removed.connect(lambda _: self.rebuild_grid())
         pc_manager.signals.device_status_changed.connect(self._on_status_changed)
         agent_server.thumbnail_received.connect(self._on_thumbnail_received)
+        agent_server.agent_connected.connect(self._on_agent_connected)
+        agent_server.agent_disconnected.connect(self._on_agent_disconnected)
 
-        # 썸네일 갱신 타이머
-        interval = settings.get('screen.thumbnail_interval', 3000)
+        # 폴백 썸네일 갱신 타이머 (push 미지원 에이전트 대응)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._request_all_thumbnails)
-        self._refresh_timer.start(interval)
+        self._refresh_timer.start(3000)
 
     def rebuild_grid(self):
         """그리드 재구성"""
@@ -174,13 +177,23 @@ class GridView(QScrollArea):
             if thumb:
                 thumb.update_thumbnail(jpeg_data)
 
+    def _on_agent_connected(self, agent_id: str, agent_ip: str):
+        """에이전트 연결 시 push 모드 시작"""
+        push_interval = settings.get('screen.thumbnail_interval', 3000) / 1000.0
+        push_interval = max(0.5, min(push_interval, 5.0))  # 0.5~5초 범위
+        self.agent_server.start_thumbnail_push(agent_id, push_interval)
+        self._push_agents.add(agent_id)
+        logger.info(f"[GridView] 썸네일 push 시작: {agent_id} ({push_interval}초)")
+
+    def _on_agent_disconnected(self, agent_id: str):
+        """에이전트 해제 시 push 추적 제거"""
+        self._push_agents.discard(agent_id)
+
     def _request_all_thumbnails(self):
-        """온라인 PC들에 썸네일 요청"""
+        """온라인 PC들에 썸네일 요청 (push 미활성 에이전트 대상)"""
         online_pcs = self.pc_manager.get_online_pcs()
-        if online_pcs:
-            logger.info(f"[GridView] 썸네일 요청: {[pc.name for pc in online_pcs]}")
         for pc in online_pcs:
-            if not pc.is_streaming:  # 스트리밍 중인 PC는 스킵
+            if not pc.is_streaming and pc.agent_id not in self._push_agents:
                 self.agent_server.request_thumbnail(pc.agent_id)
 
     def resizeEvent(self, event):
