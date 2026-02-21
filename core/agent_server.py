@@ -293,7 +293,15 @@ class AgentServer(QObject):
 
     async def _connect_loop(self):
         """서버 WS 릴레이에 접속 + 자동 재연결"""
-        ws_url = f"{self._server_url}/ws/manager?token={self._token}"
+        # http(s):// → ws(s):// 변환
+        base = self._server_url
+        if base.startswith('https://'):
+            base = 'wss://' + base[8:]
+        elif base.startswith('http://'):
+            base = 'ws://' + base[7:]
+        elif not base.startswith(('ws://', 'wss://')):
+            base = 'ws://' + base
+        ws_url = f"{base}/ws/manager?token={self._token}"
 
         while not self._stop_event.is_set():
             try:
