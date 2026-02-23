@@ -707,7 +707,18 @@ class WellcomAgent:
             self.screen_capture.close()
 
     async def _run_server(self):
-        """WS 서버 시작 — 매니저 접속 대기 (LinkIO 방식)"""
+        """WS 서버(LAN P2P) + 서버 릴레이 클라이언트(WAN) 동시 실행"""
+        tasks = [asyncio.create_task(self._run_p2p_server())]
+        # 서버 릴레이 (WAN 폴백 — 포트포워딩 불필요)
+        if self.config.api_url and self.config.api_token:
+            tasks.append(asyncio.create_task(self._run_relay_client()))
+        try:
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.error(f"서버 실행 오류: {e}")
+
+    async def _run_p2p_server(self):
+        """P2P WS 서버 (LAN 직접 연결용, 포트 21350)"""
         try:
             async with websockets.serve(
                 self._handle_manager,
@@ -716,11 +727,73 @@ class WellcomAgent:
                 ping_interval=20,
                 ping_timeout=20,
             ):
-                logger.info(f"★ WS 서버 시작: 0.0.0.0:{self._ws_port}")
+                logger.info(f"★ P2P WS 서버: 0.0.0.0:{self._ws_port} (LAN 직접 연결)")
                 while self._running:
                     await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"WS 서버 오류: {e}")
+            logger.error(f"P2P WS 서버 오류: {e}")
+
+    async def _run_relay_client(self):
+        """서버 릴레이 클라이언트 — /ws/agent에 연결하여 WAN 폴백 지원.
+
+        에이전트가 방화벽/NAT 뒤에 있어도 매니저가 서버 릴레이를 통해 연결 가능.
+        포트포워딩 불필요.
+        """
+        url = self.config.api_url or ''
+        if url.startswith('https://'):
+            ws_base = 'wss://' + url[8:]
+        elif url.startswith('http://'):
+            ws_base = 'ws://' + url[7:]
+        else:
+            ws_base = url
+        # 끝 / 제거
+        ws_base = ws_base.rstrip('/')
+        ws_url = f"{ws_base}/ws/agent?token={self.config.api_token}"
+
+        RELAY_ID = '__relay__'
+
+        while self._running:
+            try:
+                async with websockets.connect(
+                    ws_url,
+                    max_size=50 * 1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=20,
+                ) as ws:
+                    # 에이전트 등록 (agent_id, 호스트명, ws_port 전달)
+                    await ws.send(json.dumps({
+                        'type': 'auth',
+                        'agent_id': self._agent_id,
+                        'hostname': socket.gethostname(),
+                        'ws_port': self._ws_port,
+                    }))
+                    logger.info("★ 서버 릴레이 연결 성공 — WAN 폴백 활성")
+                    self._managers[RELAY_ID] = ws
+
+                    try:
+                        async for message in ws:
+                            if not self._running:
+                                break
+                            if isinstance(message, str):
+                                await self._handle_text(ws, message, RELAY_ID)
+                            elif isinstance(message, bytes):
+                                await self._handle_binary(ws, message, RELAY_ID)
+                    finally:
+                        self._managers.pop(RELAY_ID, None)
+                        task = self._stream_tasks.pop(RELAY_ID, None)
+                        if task:
+                            task.cancel()
+                        task = self._thumbnail_tasks.pop(RELAY_ID, None)
+                        if task:
+                            task.cancel()
+                        self._stream_settings.pop(RELAY_ID, None)
+                        logger.info("서버 릴레이 연결 종료")
+
+            except Exception as e:
+                logger.debug(f"릴레이 연결 오류: {e}")
+
+            if self._running:
+                await asyncio.sleep(10)  # 재연결 대기
 
     async def _handle_manager(self, websocket):
         """매니저 연결 핸들러"""
