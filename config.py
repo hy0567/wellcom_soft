@@ -137,6 +137,12 @@ class Settings:
             'username': '',
             'auto_login': False
         },
+        'p2p': {
+            'agent_ws_port': 21350,        # 에이전트 WS 서버 기본 포트
+            'connect_timeout_lan': 3,      # LAN(ip2) 연결 타임아웃 (초)
+            'connect_timeout_wan': 5,      # WAN(ip1) 연결 타임아웃 (초)
+            'reconnect_interval': 10,      # 재연결 간격 (초)
+        },
     }
 
     def __new__(cls):

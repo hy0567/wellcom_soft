@@ -26,7 +26,9 @@ class PCInfo:
     screen_width: int = 1920
     screen_height: int = 1080
     memo: str = ""          # 메모 필드 (LinkIO list.json의 memo)
-    public_ip: str = ""     # 공인 IP (LinkIO의 Ip1)
+    public_ip: str = ""     # 공인 IP (LinkIO의 Ip1, P2P WAN용)
+    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
+    connection_mode: str = ""  # "lan" / "wan" / "relay" / "" (P2P 연결 모드)
     keymap_name: str = ""   # 지정된 키매핑 이름
     script_name: str = ""   # 지정된 스크립트 이름
 

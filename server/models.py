@@ -52,6 +52,8 @@ class AgentRegister(BaseModel):
     hostname: str
     os_info: str = ""
     ip: str = ""
+    ip_public: str = ""     # 공인IP (P2P용, LinkIO의 Ip1)
+    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
     mac_address: str = ""
     screen_width: int = 1920
     screen_height: int = 1080
@@ -60,6 +62,8 @@ class AgentRegister(BaseModel):
 class AgentHeartbeat(BaseModel):
     agent_id: str
     ip: str = ""
+    ip_public: str = ""     # 공인IP (P2P용)
+    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
     screen_width: int = 1920
     screen_height: int = 1080
 
@@ -70,6 +74,8 @@ class AgentResponse(BaseModel):
     hostname: str
     os_info: str = ""
     ip: str = ""
+    ip_public: str = ""     # 공인IP (P2P용)
+    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
     mac_address: str = ""
     screen_width: int = 1920
     screen_height: int = 1080

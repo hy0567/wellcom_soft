@@ -10,7 +10,7 @@ class AgentConfig:
 
     DEFAULT = {
         'server_ip': '',
-        'server_port': 4797,        # 에이전트 WS 서버 리스닝 포트
+        'server_port': 4797,        # 서버 REST API 포트
         'api_url': 'http://log.wellcomll.org:4797',   # 서버 API URL
         'api_username': '',         # 서버 로그인 사용자명
         'api_token': '',            # 서버 JWT 토큰 (자동 저장)
@@ -22,6 +22,9 @@ class AgentConfig:
         'thumbnail_quality': 30,    # 썸네일 품질
         'thumbnail_width': 320,     # 썸네일 최대 너비
         'heartbeat_interval': 30,   # 하트비트 간격 (초)
+        # P2P WS 서버 설정 (v3.0.0)
+        'ws_port': 21350,           # WS 서버 리스닝 포트 (매니저가 직접 접속)
+        'ws_max_connections': 5,    # 최대 동시 매니저 연결 수
     }
 
     def __init__(self, config_path: str = None):
@@ -134,3 +137,11 @@ class AgentConfig:
     @property
     def heartbeat_interval(self) -> int:
         return self._data.get('heartbeat_interval', 30)
+
+    @property
+    def ws_port(self) -> int:
+        return self._data.get('ws_port', 21350)
+
+    @property
+    def ws_max_connections(self) -> int:
+        return self._data.get('ws_max_connections', 5)

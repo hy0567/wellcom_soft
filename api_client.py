@@ -106,6 +106,7 @@ class APIClient:
 
     def register_agent(self, agent_id: str, hostname: str,
                        os_info: str = '', ip: str = '',
+                       ip_public: str = '', ws_port: int = 21350,
                        mac_address: str = '',
                        screen_width: int = 1920, screen_height: int = 1080) -> dict:
         """에이전트 등록 (로그인한 사용자 소유로)"""
@@ -114,18 +115,23 @@ class APIClient:
             'hostname': hostname,
             'os_info': os_info,
             'ip': ip,
+            'ip_public': ip_public,
+            'ws_port': ws_port,
             'mac_address': mac_address,
             'screen_width': screen_width,
             'screen_height': screen_height,
         })
 
     def send_heartbeat(self, agent_id: str, ip: str = '',
+                       ip_public: str = '', ws_port: int = 21350,
                        screen_width: int = 1920, screen_height: int = 1080):
         """에이전트 하트비트"""
         try:
             self._post('/api/agents/heartbeat', {
                 'agent_id': agent_id,
                 'ip': ip,
+                'ip_public': ip_public,
+                'ws_port': ws_port,
                 'screen_width': screen_width,
                 'screen_height': screen_height,
             })

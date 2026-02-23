@@ -121,6 +121,17 @@ def startup_init():
                 )
             """)
 
+            # agents 테이블에 P2P용 필드 추가 (v3.0.0)
+            for col_name, col_def in [
+                ('ip_public', "VARCHAR(50) DEFAULT ''"),
+                ('ws_port', "INT DEFAULT 21350"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE agents ADD COLUMN {col_name} {col_def}")
+                    print(f"[Init] agents 테이블에 {col_name} 컬럼 추가")
+                except Exception:
+                    pass  # 이미 존재
+
             # admin 계정 초기화
             cur.execute("SELECT id, password FROM users WHERE username = 'admin'")
             admin = cur.fetchone()
@@ -210,11 +221,13 @@ def register_agent(req: AgentRegister, user: dict = Depends(get_current_user)):
                 cur.execute("""
                     UPDATE agents SET
                         hostname = %s, os_info = %s, ip = %s,
+                        ip_public = %s, ws_port = %s,
                         mac_address = %s, screen_width = %s, screen_height = %s,
                         is_online = TRUE, last_seen = %s
                     WHERE id = %s
                 """, (
                     req.hostname, req.os_info, req.ip,
+                    req.ip_public, req.ws_port,
                     req.mac_address, req.screen_width, req.screen_height,
                     now, existing["id"],
                 ))
@@ -224,12 +237,14 @@ def register_agent(req: AgentRegister, user: dict = Depends(get_current_user)):
                 cur.execute("""
                     INSERT INTO agents
                         (agent_id, owner_id, hostname, os_info, ip,
+                         ip_public, ws_port,
                          mac_address, screen_width, screen_height,
                          is_online, last_seen)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
                 """, (
                     req.agent_id, user["id"],
                     req.hostname, req.os_info, req.ip,
+                    req.ip_public, req.ws_port,
                     req.mac_address, req.screen_width, req.screen_height,
                     now,
                 ))
@@ -254,10 +269,12 @@ def agent_heartbeat(req: AgentHeartbeat, user: dict = Depends(get_current_user))
             cur.execute("""
                 UPDATE agents SET
                     is_online = TRUE, last_seen = %s, ip = %s,
+                    ip_public = %s, ws_port = %s,
                     screen_width = %s, screen_height = %s
                 WHERE agent_id = %s AND owner_id = %s
             """, (
                 datetime.now(timezone.utc), req.ip,
+                req.ip_public, req.ws_port,
                 req.screen_width, req.screen_height,
                 req.agent_id, user["id"],
             ))
@@ -519,6 +536,8 @@ def _agent_to_response(agent: dict) -> AgentResponse:
         hostname=agent["hostname"],
         os_info=agent.get("os_info", ""),
         ip=agent.get("ip", ""),
+        ip_public=agent.get("ip_public", ""),
+        ws_port=agent.get("ws_port", 21350),
         mac_address=agent.get("mac_address", ""),
         screen_width=agent.get("screen_width", 1920),
         screen_height=agent.get("screen_height", 1080),

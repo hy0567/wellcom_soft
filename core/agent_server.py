@@ -1,12 +1,11 @@
-"""다중 에이전트 WebSocket 릴레이 클라이언트
+"""P2P 연결 매니저 — 각 에이전트에 직접 WS 접속
 
-관리PC(매니저)가 서버의 /ws/manager 엔드포인트에 접속하여,
-서버가 에이전트↔매니저 간 메시지를 릴레이한다.
-포트포워딩 불필요 — 매니저/에이전트 모두 서버에 접속.
+v3.0.0: 서버 릴레이 → P2P 직접 연결
+- 에이전트별 독립 WS 연결 (1 에이전트 = 1 WebSocket)
+- 연결 우선순위: LAN(ip2) → WAN(ip1) → 서버 릴레이(폴백)
+- 시그널 인터페이스 100% 기존 호환 (UI 변경 없음)
 
-메시지 라우팅:
-  매니저→서버→에이전트: JSON에 target_agent 필드 추가 / 바이너리에 agent_id(32B) 프리픽스
-  에이전트→서버→매니저: JSON에 source_agent 필드 포함 / 바이너리에 agent_id(32B) 프리픽스
+클래스명 AgentServer 유지 (UI 코드 변경 최소화).
 """
 
 import asyncio
@@ -15,6 +14,8 @@ import base64
 import logging
 import threading
 import os
+from enum import Enum
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -28,7 +29,7 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
     logger.warning("websockets 미설치 — 에이전트 기능 비활성화")
 
-# agent_id 바이너리 패딩 크기 (서버 릴레이 프로토콜)
+# 서버 릴레이용 agent_id 패딩 (폴백 모드)
 AGENT_ID_LEN = 32
 
 
@@ -40,70 +41,104 @@ def _unpad_agent_id(data: bytes) -> str:
     return data[:AGENT_ID_LEN].rstrip(b'\x00').decode('utf-8', errors='replace')
 
 
-class AgentServer(QObject):
-    """다중 에이전트 WebSocket 릴레이 클라이언트 (관리PC 측)
+class ConnectionMode(Enum):
+    LAN = "lan"               # ip2(사설IP) 직접 연결
+    WAN = "wan"               # ip1(공인IP) 직접 연결
+    RELAY = "relay"           # 서버 릴레이 폴백
+    DISCONNECTED = "disconnected"
 
-    서버의 /ws/manager?token=JWT 엔드포인트에 접속하여
-    서버가 중계하는 에이전트 메시지를 수신/전송한다.
+
+@dataclass
+class AgentConnection:
+    """에이전트별 연결 상태"""
+    agent_id: str
+    ws: Optional[object] = None
+    mode: ConnectionMode = ConnectionMode.DISCONNECTED
+    ip_private: str = ""      # ip2 (LAN)
+    ip_public: str = ""       # ip1 (WAN)
+    ws_port: int = 21350
+    info: dict = field(default_factory=dict)
+    _recv_task: Optional[asyncio.Task] = field(default=None, repr=False)
+
+
+class AgentServer(QObject):
+    """P2P 연결 매니저 — 각 에이전트에 직접 WS 접속
+
+    v3.0.0: 서버 릴레이 → P2P 직접 연결
+    - 에이전트별 독립 WS 연결 (1 에이전트 = 1 WebSocket)
+    - 연결 우선순위: LAN(ip2) → WAN(ip1) → 서버 릴레이(폴백)
+    - 시그널 인터페이스 100% 기존 호환
     """
 
-    # 시그널 (기존 인터페이스 100% 유지)
-    agent_connected = pyqtSignal(str, str)         # agent_id, remote_ip
-    agent_disconnected = pyqtSignal(str)            # agent_id
-    thumbnail_received = pyqtSignal(str, bytes)     # agent_id, jpeg_data
-    screen_frame_received = pyqtSignal(str, bytes)  # agent_id, jpeg_data
-    h264_frame_received = pyqtSignal(str, int, bytes)  # agent_id, header(0x03|0x04), raw_data  v2.0.2
-    stream_started = pyqtSignal(str, dict)           # agent_id, info_dict  v2.0.2
+    # ★ 시그널 100% 동일 유지 (UI 변경 없음)
+    agent_connected = pyqtSignal(str, str)            # agent_id, remote_ip
+    agent_disconnected = pyqtSignal(str)               # agent_id
+    thumbnail_received = pyqtSignal(str, bytes)        # agent_id, jpeg_data
+    screen_frame_received = pyqtSignal(str, bytes)     # agent_id, jpeg_data
+    h264_frame_received = pyqtSignal(str, int, bytes)  # agent_id, header, raw_data
+    stream_started = pyqtSignal(str, dict)             # agent_id, info_dict
     clipboard_received = pyqtSignal(str, str, object)  # agent_id, format, data
-    file_progress = pyqtSignal(str, int, int)       # agent_id, sent, total
-    file_complete = pyqtSignal(str, str)            # agent_id, remote_path
-    command_result = pyqtSignal(str, str, str, int)  # agent_id, command, output, returncode
+    file_progress = pyqtSignal(str, int, int)          # agent_id, sent, total
+    file_complete = pyqtSignal(str, str)               # agent_id, remote_path
+    command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
+    connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
 
     CHUNK_SIZE = 64 * 1024  # 64KB
 
     # 바이너리 프레임 헤더
     HEADER_THUMBNAIL = 0x01
     HEADER_STREAM = 0x02
-    HEADER_H264_KEYFRAME = 0x03   # v2.0.2
-    HEADER_H264_DELTA = 0x04      # v2.0.2
+    HEADER_H264_KEYFRAME = 0x03
+    HEADER_H264_DELTA = 0x04
 
     def __init__(self):
         super().__init__()
-        self._ws: Optional[object] = None           # 서버 WebSocket 연결
-        self._agents: Dict[str, dict] = {}           # agent_id → info dict (가상)
+        self._connections: Dict[str, AgentConnection] = {}
+        self._relay_ws: Optional[object] = None  # 서버 릴레이 WS (폴백용)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._server_url: str = ""
+        self._server_url: str = ""    # 서버 REST/WS URL (폴백용)
         self._token: str = ""
+        self._manager_id: str = ""    # 매니저 식별자
+        # 연결 타임아웃 설정
+        self._timeout_lan: int = 3
+        self._timeout_wan: int = 5
+        self._reconnect_interval: int = 10
 
     @property
     def connected_count(self) -> int:
-        return len(self._agents)
+        return sum(1 for c in self._connections.values()
+                   if c.mode != ConnectionMode.DISCONNECTED)
 
     def get_connected_agents(self) -> List[str]:
-        return list(self._agents.keys())
+        return [aid for aid, c in self._connections.items()
+                if c.mode != ConnectionMode.DISCONNECTED]
 
     def is_agent_connected(self, agent_id: str) -> bool:
-        return agent_id in self._agents
+        conn = self._connections.get(agent_id)
+        return conn is not None and conn.mode != ConnectionMode.DISCONNECTED and conn.ws is not None
 
     def get_agent_info(self, agent_id: str) -> Optional[dict]:
-        return self._agents.get(agent_id)
+        conn = self._connections.get(agent_id)
+        return conn.info if conn else None
+
+    def get_connection_mode(self, agent_id: str) -> str:
+        """에이전트의 현재 연결 모드 반환"""
+        conn = self._connections.get(agent_id)
+        return conn.mode.value if conn else "disconnected"
 
     # ==================== 연결 수명주기 ====================
 
     def start_connection(self, server_url: str, token: str):
-        """서버 WS 릴레이에 접속 (백그라운드 스레드)
+        """P2P 연결 매니저 시작 (백그라운드 스레드)
 
         Args:
-            server_url: 서버 WS URL (예: ws://log.wellcomll.org:4797)
+            server_url: 서버 URL (폴백 릴레이 + REST API용)
             token: JWT 토큰
         """
         if not WEBSOCKETS_AVAILABLE:
-            logger.error(
-                "[AgentServer] websockets 미설치 — 서버 접속 불가! "
-                "pip install websockets 또는 app/_vendor/ 에 번들 필요"
-            )
+            logger.error("[P2P] websockets 미설치 — 연결 불가")
             return
 
         if self._thread and self._thread.is_alive():
@@ -113,36 +148,76 @@ class AgentServer(QObject):
         self._token = token
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name='AgentServer'
+            target=self._run_loop, daemon=True, name='AgentServer-P2P'
         )
         self._thread.start()
-        logger.info(f"[AgentServer] 서버 릴레이 접속 시작: {server_url}")
+        logger.info(f"[P2P] 연결 매니저 시작 (서버: {server_url})")
+
+    def connect_to_agent(self, agent_id: str, ip_private: str,
+                         ip_public: str, ws_port: int = 21350):
+        """에이전트에 P2P 연결 시도 (LAN→WAN→릴레이)"""
+        conn = self._connections.get(agent_id)
+        if conn and conn.mode != ConnectionMode.DISCONNECTED:
+            # 이미 연결됨 — IP 정보만 업데이트
+            conn.ip_private = ip_private
+            conn.ip_public = ip_public
+            conn.ws_port = ws_port
+            return
+
+        conn = AgentConnection(
+            agent_id=agent_id,
+            ip_private=ip_private,
+            ip_public=ip_public,
+            ws_port=ws_port,
+        )
+        self._connections[agent_id] = conn
+
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._connect_cascade(agent_id), self._loop
+            )
+
+    def disconnect_agent(self, agent_id: str):
+        """에이전트 연결 해제"""
+        conn = self._connections.get(agent_id)
+        if conn and conn.ws and self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._close_connection(agent_id), self._loop
+            )
 
     def stop_connection(self):
-        """서버 연결 종료"""
+        """전체 연결 매니저 종료"""
         self._stop_event.set()
 
-        if self._ws and self._loop and self._loop.is_running():
+        # 모든 에이전트 연결 해제
+        if self._loop and self._loop.is_running():
+            for agent_id in list(self._connections.keys()):
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._close_connection(agent_id), self._loop
+                    )
+                except Exception:
+                    pass
+
+        # 릴레이 연결 해제
+        if self._relay_ws and self._loop and self._loop.is_running():
             try:
-                asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
+                asyncio.run_coroutine_threadsafe(self._relay_ws.close(), self._loop)
             except Exception:
                 pass
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
 
-        # 모든 가상 에이전트 해제
-        for agent_id in list(self._agents.keys()):
+        for agent_id in list(self._connections.keys()):
             self.agent_disconnected.emit(agent_id)
-        self._agents.clear()
+        self._connections.clear()
 
-    # 하위 호환 (start_server/stop_server → start_connection/stop_connection)
+    # 하위 호환
     def start_server(self):
-        """하위 호환 — start_connection 사용 권장"""
-        logger.warning("[AgentServer] start_server() 호출 — 서버 URL 없이 시작 불가")
+        logger.warning("[P2P] start_server() → start_connection() 사용 권장")
 
     def stop_server(self):
-        """하위 호환"""
         self.stop_connection()
 
     # ==================== 에이전트에 명령 전송 ====================
@@ -161,19 +236,16 @@ class AgentServer(QObject):
         self._send_to_agent(agent_id, {'type': 'stop_stream'})
 
     def update_streaming(self, agent_id: str, fps: int = 15, quality: int = 60):
-        """스트리밍 중 화질/FPS 실시간 변경 (v2.0.1)"""
         self._send_to_agent(agent_id, {
             'type': 'update_stream', 'fps': fps, 'quality': quality,
         })
 
     def send_special_key(self, agent_id: str, key_combo: str):
-        """특수키 전송: ctrl_alt_del, alt_tab, win (v2.0.1)"""
         self._send_to_agent(agent_id, {
             'type': 'special_key', 'combo': key_combo,
         })
 
     def request_keyframe(self, agent_id: str):
-        """H.264 키프레임 강제 요청 (v2.0.2)"""
         self._send_to_agent(agent_id, {'type': 'request_keyframe'})
 
     def start_thumbnail_push(self, agent_id: str, interval: float = 1.0):
@@ -249,94 +321,90 @@ class AgentServer(QObject):
         for agent_id in agent_ids:
             self.execute_command(agent_id, command)
 
-    # ==================== 내부 구현 ====================
-
-    # v2.1.0: 입력 명령 전송 카운터 (디버그)
-    _input_send_count: int = 0
+    # ==================== 내부 구현 — 전송 ====================
 
     def _send_to_agent(self, agent_id: str, msg_dict: dict):
-        """서버 릴레이를 통해 에이전트에 JSON 메시지 전송"""
-        if not self._ws or not self._loop or not self._loop.is_running():
-            msg_type = msg_dict.get('type', '?')
-            if msg_type in ('mouse_event', 'key_event'):
-                logger.warning(
-                    f"[AgentServer] 입력 전송 실패 — WS 미연결: type={msg_type}, "
-                    f"ws={'있음' if self._ws else '없음'}, "
-                    f"loop={'실행중' if self._loop and self._loop.is_running() else '없음'}"
-                )
+        """에이전트에 JSON 전송 (P2P 직접 또는 릴레이)"""
+        conn = self._connections.get(agent_id)
+        if not conn or not conn.ws or not self._loop or not self._loop.is_running():
             return
 
-        # target_agent 필드 추가 (서버가 라우팅)
-        msg_dict['target_agent'] = agent_id
+        if conn.mode == ConnectionMode.RELAY:
+            # 릴레이: target_agent 추가 (기존 서버 릴레이 방식)
+            msg_dict['target_agent'] = agent_id
+
         msg = json.dumps(msg_dict)
-
-        # v2.1.0: 입력 이벤트 전송 로그 (클릭/키만, move 제외)
-        msg_type = msg_dict.get('type', '')
-        if msg_type == 'key_event':
-            self._input_send_count += 1
-            logger.info(
-                f"[AgentServer] 키 전송 #{self._input_send_count}: "
-                f"key={msg_dict.get('key')}, agent={agent_id}"
-            )
-        elif msg_type == 'mouse_event' and msg_dict.get('action') != 'move':
-            self._input_send_count += 1
-            logger.info(
-                f"[AgentServer] 마우스 전송 #{self._input_send_count}: "
-                f"action={msg_dict.get('action')}, btn={msg_dict.get('button')}, "
-                f"pos=({msg_dict.get('x')},{msg_dict.get('y')}), agent={agent_id}"
-            )
-
-        asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
+        try:
+            asyncio.run_coroutine_threadsafe(conn.ws.send(msg), self._loop)
+        except Exception:
+            pass
 
     def _send_binary_to_agent(self, agent_id: str, data: bytes):
-        """서버 릴레이를 통해 에이전트에 바이너리 전송"""
-        if not self._ws or not self._loop or not self._loop.is_running():
+        """에이전트에 바이너리 전송"""
+        conn = self._connections.get(agent_id)
+        if not conn or not conn.ws or not self._loop or not self._loop.is_running():
             return
 
-        # agent_id(32B) + 원본 데이터
-        prefixed = _pad_agent_id(agent_id) + data
-        asyncio.run_coroutine_threadsafe(self._ws.send(prefixed), self._loop)
+        if conn.mode == ConnectionMode.RELAY:
+            # 릴레이: 32B agent_id prefix 추가
+            prefixed = _pad_agent_id(agent_id) + data
+            try:
+                asyncio.run_coroutine_threadsafe(conn.ws.send(prefixed), self._loop)
+            except Exception:
+                pass
+        else:
+            # P2P: 직접 전송 (prefix 없음)
+            try:
+                asyncio.run_coroutine_threadsafe(conn.ws.send(data), self._loop)
+            except Exception:
+                pass
 
     async def _send_file_async(self, agent_id: str, filepath: str):
-        """파일 전송 코루틴 (릴레이 경유)"""
-        if not self._ws:
+        """파일 전송 코루틴"""
+        conn = self._connections.get(agent_id)
+        if not conn or not conn.ws:
             return
 
         filename = os.path.basename(filepath)
         filesize = os.path.getsize(filepath)
 
         # file_start
-        await self._ws.send(json.dumps({
-            'type': 'file_start', 'name': filename, 'size': filesize,
-            'target_agent': agent_id,
-        }))
+        start_msg = {'type': 'file_start', 'name': filename, 'size': filesize}
+        if conn.mode == ConnectionMode.RELAY:
+            start_msg['target_agent'] = agent_id
+        await conn.ws.send(json.dumps(start_msg))
 
-        # 파일 청크 전송 (바이너리 — agent_id 프리픽스)
+        # 파일 청크 전송
         sent = 0
         with open(filepath, 'rb') as f:
             while True:
                 chunk = f.read(self.CHUNK_SIZE)
                 if not chunk:
                     break
-                await self._ws.send(_pad_agent_id(agent_id) + chunk)
+                if conn.mode == ConnectionMode.RELAY:
+                    await conn.ws.send(_pad_agent_id(agent_id) + chunk)
+                else:
+                    await conn.ws.send(chunk)
                 sent += len(chunk)
                 self.file_progress.emit(agent_id, sent, filesize)
 
         # file_end
-        await self._ws.send(json.dumps({
-            'type': 'file_end', 'name': filename,
-            'target_agent': agent_id,
-        }))
+        end_msg = {'type': 'file_end', 'name': filename}
+        if conn.mode == ConnectionMode.RELAY:
+            end_msg['target_agent'] = agent_id
+        await conn.ws.send(json.dumps(end_msg))
+
+    # ==================== 내부 구현 — 연결 ====================
 
     def _run_loop(self):
         """asyncio 이벤트 루프 실행 (스레드)"""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._connect_loop())
+            self._loop.run_until_complete(self._main_loop())
         except Exception as e:
             if not self._stop_event.is_set():
-                logger.error(f"AgentServer 오류: {e}")
+                logger.error(f"[P2P] 이벤트 루프 오류: {e}")
         finally:
             try:
                 self._loop.close()
@@ -344,113 +412,165 @@ class AgentServer(QObject):
                 pass
             self._loop = None
 
-    async def _connect_loop(self):
-        """서버 WS 릴레이에 접속 + 자동 재연결"""
-        # http(s):// → ws(s):// 변환
-        base = self._server_url
-        if base.startswith('https://'):
-            base = 'wss://' + base[8:]
-        elif base.startswith('http://'):
-            base = 'ws://' + base[7:]
-        elif not base.startswith(('ws://', 'wss://')):
-            base = 'ws://' + base
-        ws_url = f"{base}/ws/manager?token={self._token}"
+    async def _main_loop(self):
+        """메인 이벤트 루프 — 종료까지 대기"""
+        # 서버 릴레이도 백그라운드로 연결 (폴백용)
+        relay_task = asyncio.create_task(self._relay_connect_loop())
 
-        while not self._stop_event.is_set():
+        try:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            relay_task.cancel()
             try:
-                logger.info(f"[AgentServer] 서버 릴레이 접속 시도...")
-                async with websockets.connect(
-                    ws_url,
+                await relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _connect_cascade(self, agent_id: str):
+        """LAN → WAN → 릴레이 순서로 연결 시도"""
+        conn = self._connections.get(agent_id)
+        if not conn:
+            return
+
+        # 1단계: LAN (ip2) 직접 연결
+        if conn.ip_private:
+            ws = await self._try_p2p_connect(
+                f"ws://{conn.ip_private}:{conn.ws_port}",
+                timeout=self._timeout_lan,
+            )
+            if ws:
+                conn.ws = ws
+                conn.mode = ConnectionMode.LAN
+                logger.info(f"[P2P] {agent_id} LAN 연결 성공: {conn.ip_private}:{conn.ws_port}")
+                self.agent_connected.emit(agent_id, conn.ip_private)
+                self.connection_mode_changed.emit(agent_id, "lan")
+                conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                return
+
+        # 2단계: WAN (ip1) 직접 연결
+        if conn.ip_public:
+            ws = await self._try_p2p_connect(
+                f"ws://{conn.ip_public}:{conn.ws_port}",
+                timeout=self._timeout_wan,
+            )
+            if ws:
+                conn.ws = ws
+                conn.mode = ConnectionMode.WAN
+                logger.info(f"[P2P] {agent_id} WAN 연결 성공: {conn.ip_public}:{conn.ws_port}")
+                self.agent_connected.emit(agent_id, conn.ip_public)
+                self.connection_mode_changed.emit(agent_id, "wan")
+                conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                return
+
+        # 3단계: 서버 릴레이 폴백
+        if self._relay_ws:
+            # 릴레이 모드: 서버 WS를 공유하되 agent_id로 라우팅
+            conn.ws = self._relay_ws
+            conn.mode = ConnectionMode.RELAY
+            logger.info(f"[P2P] {agent_id} 릴레이 폴백")
+            self.agent_connected.emit(agent_id, "relay")
+            self.connection_mode_changed.emit(agent_id, "relay")
+            return
+
+        # 전부 실패
+        conn.mode = ConnectionMode.DISCONNECTED
+        logger.warning(f"[P2P] {agent_id} 연결 실패 (LAN/WAN/릴레이)")
+
+    async def _try_p2p_connect(self, url: str, timeout: int = 3):
+        """P2P 직접 WS 연결 시도 + 인증 핸드셰이크"""
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
                     max_size=50 * 1024 * 1024,
                     ping_interval=20,
                     ping_timeout=20,
-                    close_timeout=10,
-                ) as ws:
-                    self._ws = ws
-                    self._binary_frame_count = 0
-                    logger.info("[AgentServer] 서버 릴레이 접속 성공 — 메시지 수신 대기")
+                ),
+                timeout=timeout,
+            )
 
-                    # 메시지 수신 루프
-                    async for message in ws:
-                        if self._stop_event.is_set():
-                            break
+            # P2P 인증 핸드셰이크
+            await ws.send(json.dumps({
+                'type': 'auth',
+                'token': self._token,
+                'manager_id': self._manager_id or 'manager',
+            }))
 
-                        if isinstance(message, str):
-                            self._handle_relay_text(message)
-                        elif isinstance(message, bytes):
-                            self._handle_relay_binary(message)
+            raw = await asyncio.wait_for(ws.recv(), timeout=5)
+            msg = json.loads(raw)
+            if msg.get('type') == 'auth_ok':
+                return ws
+            else:
+                await ws.close()
+        except Exception as e:
+            logger.debug(f"[P2P] 연결 실패 ({url}): {e}")
+        return None
 
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.info(f"[AgentServer] 서버 연결 종료: {e}")
-            except Exception as e:
-                if not self._stop_event.is_set():
-                    logger.warning(f"[AgentServer] 서버 연결 오류: {e}")
-            finally:
-                self._ws = None
-                # 모든 에이전트 연결 해제 알림
-                for agent_id in list(self._agents.keys()):
-                    self.agent_disconnected.emit(agent_id)
-                self._agents.clear()
+    async def _close_connection(self, agent_id: str):
+        """에이전트 연결 닫기"""
+        conn = self._connections.get(agent_id)
+        if not conn:
+            return
 
-            # 재연결 대기
+        if conn._recv_task and not conn._recv_task.done():
+            conn._recv_task.cancel()
+
+        if conn.ws and conn.mode != ConnectionMode.RELAY:
+            try:
+                await conn.ws.close()
+            except Exception:
+                pass
+
+        conn.ws = None
+        conn.mode = ConnectionMode.DISCONNECTED
+
+    # ==================== P2P 수신 루프 ====================
+
+    async def _recv_loop(self, agent_id: str):
+        """P2P 직접 연결의 메시지 수신 루프"""
+        conn = self._connections.get(agent_id)
+        if not conn or not conn.ws:
+            return
+
+        try:
+            async for message in conn.ws:
+                if self._stop_event.is_set():
+                    break
+                if isinstance(message, str):
+                    self._handle_p2p_text(agent_id, message)
+                elif isinstance(message, bytes):
+                    self._handle_p2p_binary(agent_id, message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"[P2P] {agent_id} 연결 종료")
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning(f"[P2P] {agent_id} 수신 오류: {e}")
+        finally:
+            conn.ws = None
+            conn.mode = ConnectionMode.DISCONNECTED
+            self.agent_disconnected.emit(agent_id)
+
+            # 자동 재연결
             if not self._stop_event.is_set():
-                logger.info("[AgentServer] 5초 후 재연결...")
-                for _ in range(50):
-                    if self._stop_event.is_set():
-                        return
-                    await asyncio.sleep(0.1)
+                logger.info(f"[P2P] {agent_id} {self._reconnect_interval}초 후 재연결...")
+                await asyncio.sleep(self._reconnect_interval)
+                if not self._stop_event.is_set():
+                    await self._connect_cascade(agent_id)
 
-    def _handle_relay_text(self, raw: str):
-        """서버에서 릴레이된 JSON 텍스트 메시지 처리"""
+    def _handle_p2p_text(self, agent_id: str, raw: str):
+        """P2P 직접 연결 JSON 처리 (agent_id prefix 불필요 — 직접 연결)"""
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
             return
 
         msg_type = msg.get('type', '')
-        source_agent = msg.get('source_agent', '')
-
-        # 에이전트 연결/해제 알림 (서버가 전달)
-        if msg_type == 'auth':
-            agent_id = msg.get('agent_id', source_agent)
-            if agent_id:
-                hostname = msg.get('hostname', '')
-                os_info = msg.get('os_info', '')
-                ip = msg.get('ip', '')
-                self._agents[agent_id] = {
-                    'hostname': hostname,
-                    'os_info': os_info,
-                    'ip': ip,
-                    'screen_width': msg.get('screen_width', 1920),
-                    'screen_height': msg.get('screen_height', 1080),
-                }
-                self.agent_connected.emit(agent_id, ip)
-                logger.info(f"[AgentServer] 에이전트 연결 (릴레이): {agent_id}")
-            return
-
-        if msg_type == 'agent_connected':
-            agent_id = source_agent
-            if agent_id and agent_id not in self._agents:
-                self._agents[agent_id] = {'hostname': '', 'os_info': '', 'ip': ''}
-                self.agent_connected.emit(agent_id, '')
-                logger.info(f"[AgentServer] 에이전트 연결 알림: {agent_id}")
-            return
-
-        if msg_type == 'agent_disconnected':
-            agent_id = source_agent
-            if agent_id:
-                self._agents.pop(agent_id, None)
-                self.agent_disconnected.emit(agent_id)
-                logger.info(f"[AgentServer] 에이전트 해제 (릴레이): {agent_id}")
-            return
-
-        # 에이전트→매니저 메시지 (source_agent로 식별)
-        agent_id = source_agent
-        if not agent_id:
-            return
 
         if msg_type == 'stream_started':
-            # v2.0.2 — 코덱 협상 응답
             info = {
                 'codec': msg.get('codec', 'mjpeg'),
                 'encoder': msg.get('encoder', ''),
@@ -460,13 +580,9 @@ class AgentServer(QObject):
                 'quality': msg.get('quality', 60),
             }
             self.stream_started.emit(agent_id, info)
-            logger.info(
-                f"[AgentServer] 스트림 시작: {agent_id} "
-                f"codec={info['codec']}, encoder={info['encoder']}"
-            )
-            return
+            logger.info(f"[P2P] {agent_id} 스트림 시작: codec={info['codec']}")
 
-        if msg_type == 'clipboard':
+        elif msg_type == 'clipboard':
             fmt = msg.get('format', '')
             data = msg.get('data', '')
             if fmt == 'text':
@@ -495,15 +611,176 @@ class AgentServer(QObject):
             output = stdout if stdout else stderr
             self.command_result.emit(agent_id, command, output, returncode)
 
-    _binary_frame_count: int = 0  # 디버그: 바이너리 프레임 수신 카운터
+    def _handle_p2p_binary(self, agent_id: str, data: bytes):
+        """P2P 직접 연결 바이너리 처리 (32B prefix 없음 — 직접 연결)"""
+        if len(data) < 2:
+            return
+
+        header = data[0]
+        frame_data = data[1:]
+
+        if header == self.HEADER_THUMBNAIL:
+            self.thumbnail_received.emit(agent_id, frame_data)
+        elif header == self.HEADER_STREAM:
+            self.screen_frame_received.emit(agent_id, frame_data)
+        elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
+            self.h264_frame_received.emit(agent_id, header, frame_data)
+
+    # ==================== 서버 릴레이 (폴백) ====================
+
+    async def _relay_connect_loop(self):
+        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결)"""
+        if not self._server_url or not self._token:
+            return
+
+        base = self._server_url
+        if base.startswith('https://'):
+            base = 'wss://' + base[8:]
+        elif base.startswith('http://'):
+            base = 'ws://' + base[7:]
+        elif not base.startswith(('ws://', 'wss://')):
+            base = 'ws://' + base
+        ws_url = f"{base}/ws/manager?token={self._token}"
+
+        while not self._stop_event.is_set():
+            try:
+                logger.info("[P2P/Relay] 서버 릴레이 접속 시도...")
+                async with websockets.connect(
+                    ws_url,
+                    max_size=50 * 1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
+                ) as ws:
+                    self._relay_ws = ws
+                    logger.info("[P2P/Relay] 서버 릴레이 접속 성공 (폴백 대기)")
+
+                    async for message in ws:
+                        if self._stop_event.is_set():
+                            break
+                        if isinstance(message, str):
+                            self._handle_relay_text(message)
+                        elif isinstance(message, bytes):
+                            self._handle_relay_binary(message)
+
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("[P2P/Relay] 서버 연결 종료")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {e}")
+            finally:
+                self._relay_ws = None
+                # 릴레이 모드인 에이전트들 연결 해제
+                for agent_id, conn in list(self._connections.items()):
+                    if conn.mode == ConnectionMode.RELAY:
+                        conn.ws = None
+                        conn.mode = ConnectionMode.DISCONNECTED
+                        self.agent_disconnected.emit(agent_id)
+
+            if not self._stop_event.is_set():
+                for _ in range(50):
+                    if self._stop_event.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+
+    def _handle_relay_text(self, raw: str):
+        """서버 릴레이 JSON 처리 (기존 v2.x 프로토콜)"""
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+
+        msg_type = msg.get('type', '')
+        source_agent = msg.get('source_agent', '')
+
+        # 에이전트 연결/해제 (서버가 전달)
+        if msg_type == 'auth':
+            agent_id = msg.get('agent_id', source_agent)
+            if agent_id:
+                # P2P 미연결 에이전트만 릴레이로 연결
+                conn = self._connections.get(agent_id)
+                if not conn or conn.mode == ConnectionMode.DISCONNECTED:
+                    if not conn:
+                        conn = AgentConnection(agent_id=agent_id)
+                        self._connections[agent_id] = conn
+                    conn.ws = self._relay_ws
+                    conn.mode = ConnectionMode.RELAY
+                    conn.info = {
+                        'hostname': msg.get('hostname', ''),
+                        'os_info': msg.get('os_info', ''),
+                        'ip': msg.get('ip', ''),
+                        'screen_width': msg.get('screen_width', 1920),
+                        'screen_height': msg.get('screen_height', 1080),
+                    }
+                    self.agent_connected.emit(agent_id, msg.get('ip', ''))
+                    self.connection_mode_changed.emit(agent_id, "relay")
+                    logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} (릴레이)")
+            return
+
+        if msg_type == 'agent_connected':
+            agent_id = source_agent
+            if agent_id:
+                conn = self._connections.get(agent_id)
+                if not conn or conn.mode == ConnectionMode.DISCONNECTED:
+                    if not conn:
+                        conn = AgentConnection(agent_id=agent_id)
+                        self._connections[agent_id] = conn
+                    conn.ws = self._relay_ws
+                    conn.mode = ConnectionMode.RELAY
+                    self.agent_connected.emit(agent_id, '')
+                    self.connection_mode_changed.emit(agent_id, "relay")
+            return
+
+        if msg_type == 'agent_disconnected':
+            agent_id = source_agent
+            if agent_id:
+                conn = self._connections.get(agent_id)
+                if conn and conn.mode == ConnectionMode.RELAY:
+                    conn.ws = None
+                    conn.mode = ConnectionMode.DISCONNECTED
+                    self.agent_disconnected.emit(agent_id)
+                    logger.info(f"[P2P/Relay] 에이전트 해제: {agent_id}")
+            return
+
+        # 에이전트→매니저 메시지 (릴레이 경유)
+        agent_id = source_agent
+        if not agent_id:
+            return
+
+        if msg_type == 'stream_started':
+            info = {
+                'codec': msg.get('codec', 'mjpeg'),
+                'encoder': msg.get('encoder', ''),
+                'width': msg.get('width', 0),
+                'height': msg.get('height', 0),
+                'fps': msg.get('fps', 15),
+                'quality': msg.get('quality', 60),
+            }
+            self.stream_started.emit(agent_id, info)
+        elif msg_type == 'clipboard':
+            fmt = msg.get('format', '')
+            data = msg.get('data', '')
+            if fmt == 'text':
+                self.clipboard_received.emit(agent_id, 'text', data)
+            elif fmt == 'image':
+                png_data = base64.b64decode(data)
+                self.clipboard_received.emit(agent_id, 'image', png_data)
+        elif msg_type == 'file_progress':
+            self.file_progress.emit(agent_id, msg.get('received', 0), msg.get('total', 0))
+        elif msg_type == 'file_complete':
+            self.file_complete.emit(agent_id, msg.get('path', ''))
+        elif msg_type == 'execute_result':
+            command = msg.get('command', '')
+            stdout = msg.get('stdout', '')
+            stderr = msg.get('stderr', '')
+            returncode = msg.get('returncode', -1)
+            self.command_result.emit(agent_id, command, stdout if stdout else stderr, returncode)
 
     def _handle_relay_binary(self, data: bytes):
-        """서버에서 릴레이된 바이너리 메시지 처리
-
-        포맷: agent_id(32바이트) + 원본 바이너리(헤더 + JPEG)
-        """
+        """서버 릴레이 바이너리 처리 (32B prefix 있음 — 기존 방식)"""
         if len(data) < AGENT_ID_LEN + 2:
-            logger.debug(f"[AgentServer] 바이너리 프레임 너무 짧음: {len(data)}B")
             return
 
         agent_id = _unpad_agent_id(data[:AGENT_ID_LEN])
@@ -512,23 +789,9 @@ class AgentServer(QObject):
         header = payload[0]
         frame_data = payload[1:]
 
-        self._binary_frame_count += 1
-        # 첫 프레임 + 100프레임마다 로깅
-        if self._binary_frame_count == 1:
-            logger.info(
-                f"[AgentServer] 첫 바이너리 프레임: agent={agent_id}, "
-                f"header=0x{header:02x}, size={len(frame_data)}B"
-            )
-        elif self._binary_frame_count % 100 == 0:
-            logger.info(
-                f"[AgentServer] 바이너리 #{self._binary_frame_count}: "
-                f"agent={agent_id}, header=0x{header:02x}, size={len(frame_data)}B"
-            )
-
         if header == self.HEADER_THUMBNAIL:
             self.thumbnail_received.emit(agent_id, frame_data)
         elif header == self.HEADER_STREAM:
             self.screen_frame_received.emit(agent_id, frame_data)
         elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
-            # v2.0.2 — H.264 프레임: header(0x03|0x04) + [4B seq + NAL]
             self.h264_frame_received.emit(agent_id, header, frame_data)

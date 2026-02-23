@@ -173,6 +173,8 @@ class PCManager:
                         mac_address=agent_data.get('mac_address', ''),
                         screen_width=agent_data.get('screen_width', 1920),
                         screen_height=agent_data.get('screen_height', 1080),
+                        public_ip=agent_data.get('ip_public', ''),
+                        ws_port=agent_data.get('ws_port', 21350),
                     )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
                     existing_pc.server_online = srv_online
@@ -192,6 +194,8 @@ class PCManager:
                         mac_address=agent_data.get('mac_address', ''),
                         screen_width=agent_data.get('screen_width', 1920),
                         screen_height=agent_data.get('screen_height', 1080),
+                        public_ip=agent_data.get('ip_public', ''),
+                        ws_port=agent_data.get('ws_port', 21350),
                     )
                     pc = PCDevice(info)
                     pc.server_online = srv_online
@@ -212,8 +216,26 @@ class PCManager:
                     except Exception:
                         pass
 
+        # v3.0.0: 온라인 에이전트에 P2P 직접 연결 시도
+        p2p_count = 0
+        for agent_data in agents:
+            agent_id = agent_data.get('agent_id', '')
+            if not agent_id:
+                continue
+            agent_hostname = agent_data.get('hostname', '')
+            if self._is_manager_pc(agent_id, agent_hostname):
+                continue
+            if agent_data.get('is_online'):
+                self.agent_server.connect_to_agent(
+                    agent_id=agent_id,
+                    ip_private=agent_data.get('ip', ''),
+                    ip_public=agent_data.get('ip_public', ''),
+                    ws_port=agent_data.get('ws_port', 21350),
+                )
+                p2p_count += 1
+
         self.signals.devices_reloaded.emit()
-        logger.info(f"서버에서 {len(agents)}개 에이전트 동기화 완료")
+        logger.info(f"서버에서 {len(agents)}개 에이전트 동기화 완료 (P2P 연결 시도: {p2p_count}개)")
 
     def add_pc(self, name: str, agent_id: str, group: str = 'default',
                ip: str = '', hostname: str = '', os_info: str = '') -> Optional[PCDevice]:
@@ -370,11 +392,17 @@ class PCManager:
             if not pc:
                 return
 
-        # agent_server의 websocket 참조 가져오기
-        ws = self.agent_server._agents.get(agent_id)
+        # v3.0.0: P2P 연결 매니저의 AgentConnection 참조
+        conn = self.agent_server._connections.get(agent_id)
+        ws = conn.ws if conn else None
 
         with self._lock:
             pc.mark_online(ws, ip)
+            # P2P 연결 모드 저장
+            if conn:
+                pc.info.public_ip = conn.ip_public
+                pc.info.ws_port = conn.ws_port
+                pc.info.connection_mode = conn.mode.value
 
             # DB에 IP 업데이트
             db_row = self.db.get_pc_by_name(pc.name)
