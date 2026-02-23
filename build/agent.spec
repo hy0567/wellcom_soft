@@ -62,6 +62,7 @@ a = Analysis(
         'uuid',
         'winreg',
         'tkinter',
+        'tkinter.ttk',
         'tkinter.simpledialog',
         'tkinter.messagebox',
         'av',

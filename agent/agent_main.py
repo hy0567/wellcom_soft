@@ -139,7 +139,7 @@ def _show_update_ui() -> bool:
     """
     try:
         import tkinter as tk
-        from tkinter import ttk
+        import tkinter.ttk as ttk  # tkinter.ttk 직접 import
 
         try:
             from version import __version__, __github_repo__, __asset_name__
@@ -151,8 +151,8 @@ def _show_update_ui() -> bool:
         result = {'updated': False}
 
         root = tk.Tk()
-        root.title("WellcomAgent 업데이터")
-        W, H = 420, 200
+        root.title("WellcomAgent")
+        W, H = 440, 220
         root.geometry(f"{W}x{H}")
         root.resizable(False, False)
         root.configure(bg='#1e1e1e')
@@ -162,10 +162,13 @@ def _show_update_ui() -> bool:
         sy = (root.winfo_screenheight() - H) // 2
         root.geometry(f"{W}x{H}+{sx}+{sy}")
 
-        # 타이틀
-        tk.Label(root, text=f"WellcomAgent v{__version__}",
-                 bg='#1e1e1e', fg='#ffffff',
-                 font=('Segoe UI', 14, 'bold')).pack(pady=(22, 4))
+        # 앱 이름 + 버전 (크게)
+        tk.Label(root, text="WellcomAgent",
+                 bg='#1e1e1e', fg='#4CAF50',
+                 font=('Segoe UI', 15, 'bold')).pack(pady=(20, 0))
+        tk.Label(root, text=f"v{__version__}",
+                 bg='#1e1e1e', fg='#cccccc',
+                 font=('Segoe UI', 11)).pack(pady=(2, 8))
 
         # 상태 메시지
         status_var = tk.StringVar(value="업데이트 확인 중...")
@@ -179,8 +182,8 @@ def _show_update_ui() -> bool:
         sty.configure("W.Horizontal.TProgressbar",
                       background='#4CAF50', troughcolor='#333333', thickness=10)
         pb = ttk.Progressbar(root, style="W.Horizontal.TProgressbar",
-                             orient='horizontal', length=380, mode='indeterminate')
-        pb.pack(pady=12)
+                             orient='horizontal', length=390, mode='indeterminate')
+        pb.pack(pady=10)
         pb.start(12)
 
         # 퍼센트/크기 표시
@@ -193,17 +196,11 @@ def _show_update_ui() -> bool:
         def _set_status(msg):
             root.after(0, lambda: status_var.set(msg))
 
-        def _set_pct(msg):
-            root.after(0, lambda: pct_var.set(msg))
-
         def _to_determinate(val=0):
             def _do():
                 pb.stop()
                 pb.configure(mode='determinate', value=val)
             root.after(0, _do)
-
-        def _set_pb(val):
-            root.after(0, lambda: pb.configure(value=val))
 
         def _close_after(ms):
             root.after(ms, root.destroy)
@@ -212,9 +209,13 @@ def _show_update_ui() -> bool:
         def _run():
             try:
                 from pathlib import Path
-                _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                if _proj not in sys.path:
-                    sys.path.insert(0, _proj)
+                # 배포(app/): __file__ 상위 = app/ 디렉터리 → updater/가 있음
+                # 개발환경: __file__ 상위 = agent/ → 상위상위 = wellcomsoft/ → updater/가 있음
+                _here = os.path.dirname(os.path.abspath(__file__))
+                _parent = os.path.dirname(_here)
+                for _p in (_here, _parent):
+                    if _p not in sys.path:
+                        sys.path.insert(0, _p)
                 from updater import UpdateChecker
 
                 checker = UpdateChecker(
@@ -223,13 +224,13 @@ def _show_update_ui() -> bool:
                     running_version=__version__,
                 )
 
-                _set_status("GitHub에서 릴리스 정보 조회 중...")
+                _set_status("업데이트 확인 중...")
                 has_update, release = checker.check_update()
 
                 if not has_update:
                     _to_determinate(100)
-                    _set_status(f"✓ 최신 버전입니다 (v{__version__})")
-                    _close_after(1500)
+                    _set_status(f"✓ 최신 버전입니다")
+                    _close_after(2500)  # 2.5초 표시 (충분히 보임)
                     return
 
                 # 업데이트 발견
@@ -254,25 +255,22 @@ def _show_update_ui() -> bool:
 
                 if success:
                     result['updated'] = True
-
                     def _done():
                         pb.configure(value=100)
                         status_var.set("✓ 업데이트 완료 — 재시작 중...")
                         pct_var.set("")
                     root.after(0, _done)
-                    _close_after(1200)
+                    _close_after(1500)
                 else:
                     def _fail():
                         status_var.set("업데이트 실패 — 현재 버전으로 계속 실행")
                         pct_var.set("")
                     root.after(0, _fail)
-                    _close_after(2500)
+                    _close_after(3000)
 
             except Exception as e:
-                def _err():
-                    status_var.set("업데이트 확인 건너뜀")
-                    pct_var.set("")
-                root.after(0, _err)
+                _to_determinate(100)
+                _set_status("✓ 실행 준비 완료")
                 logger.debug(f"업데이트 UI 오류: {e}")
                 _close_after(2000)
 
@@ -1080,20 +1078,39 @@ class WellcomAgent:
             def on_show_info(icon, item):
                 n = len(self._managers)
                 status = f"매니저 {n}개 연결" if n > 0 else "대기 중"
-                logger.info(f"WS서버: 0.0.0.0:{self._ws_port}, 상태: {status}")
+                logger.info(
+                    f"WellcomAgent v{self._agent_version} | "
+                    f"WS: 0.0.0.0:{self._ws_port} | {status}"
+                )
                 if self.config.api_url:
                     logger.info(f"서버: {self.config.api_url}")
 
+            ver = self._agent_version or '?'
             menu = pystray.Menu(
+                # 버전 정보 (회색, 클릭 불가)
                 pystray.MenuItem(
-                    f'WellcomAgent (P2P:{self._ws_port})',
+                    f'WellcomAgent  v{ver}',
+                    None,
+                    enabled=False,
+                ),
+                pystray.Menu.SEPARATOR,
+                # 연결 상태 (기본 항목 — 더블클릭/좌클릭)
+                pystray.MenuItem(
+                    lambda item: (
+                        f'연결: {len(self._managers)}개  |  P2P:{self._ws_port}'
+                    ),
                     on_show_info,
                     default=True,
                 ),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem('종료', on_quit),
             )
 
-            icon = pystray.Icon('WellcomAgent', img, 'WellcomSOFT Agent', menu)
+            icon = pystray.Icon(
+                'WellcomAgent', img,
+                f'WellcomAgent v{ver}',  # 마우스오버 툴팁
+                menu,
+            )
             icon.run()
         except ImportError:
             logger.warning("pystray 미설치 — 트레이 아이콘 없이 실행")
