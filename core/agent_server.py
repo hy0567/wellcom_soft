@@ -83,6 +83,7 @@ class AgentServer(QObject):
     file_complete = pyqtSignal(str, str)               # agent_id, remote_path
     command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
     connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
+    update_status_received = pyqtSignal(str, dict)     # agent_id, status_dict
 
     CHUNK_SIZE = 64 * 1024  # 64KB
 
@@ -452,8 +453,12 @@ class AgentServer(QObject):
         if not conn:
             return
 
+        logger.info(f"[P2P] {agent_id} 연결 시도 시작 (LAN={conn.ip_private or 'N/A'}, "
+                     f"WAN={conn.ip_public or 'N/A'}, port={conn.ws_port})")
+
         # 1단계: LAN (ip2) 직접 연결
         if conn.ip_private:
+            logger.info(f"[P2P] {agent_id} 1단계 LAN 시도: {conn.ip_private}:{conn.ws_port}")
             result = await self._try_p2p_connect(
                 f"ws://{conn.ip_private}:{conn.ws_port}",
                 timeout=self._timeout_lan,
@@ -468,9 +473,13 @@ class AgentServer(QObject):
                 self.connection_mode_changed.emit(agent_id, "lan")
                 conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
                 return
+            logger.info(f"[P2P] {agent_id} LAN 연결 실패")
+        else:
+            logger.info(f"[P2P] {agent_id} LAN 스킵 (사설IP 없음)")
 
         # 2단계: WAN (ip1) 직접 연결
         if conn.ip_public:
+            logger.info(f"[P2P] {agent_id} 2단계 WAN 시도: {conn.ip_public}:{conn.ws_port}")
             result = await self._try_p2p_connect(
                 f"ws://{conn.ip_public}:{conn.ws_port}",
                 timeout=self._timeout_wan,
@@ -485,13 +494,15 @@ class AgentServer(QObject):
                 self.connection_mode_changed.emit(agent_id, "wan")
                 conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
                 return
+            logger.info(f"[P2P] {agent_id} WAN 연결 실패 (포트 미개방 또는 NAT)")
+        else:
+            logger.info(f"[P2P] {agent_id} WAN 스킵 (공인IP 없음)")
 
         # 3단계: 서버 릴레이 폴백
         if self._relay_ws:
-            # 릴레이 모드: 서버 WS를 공유하되 agent_id로 라우팅
             conn.ws = self._relay_ws
             conn.mode = ConnectionMode.RELAY
-            logger.info(f"[P2P] {agent_id} 릴레이 폴백")
+            logger.info(f"[P2P] {agent_id} 릴레이 폴백 (직접 연결 불가)")
             self.agent_connected.emit(agent_id, "relay")
             self.connection_mode_changed.emit(agent_id, "relay")
             return
@@ -541,7 +552,8 @@ class AgentServer(QObject):
                     return
 
             # P2P 실패 — 릴레이 유지
-            logger.debug(f"[P2P] {agent_id} P2P 업그레이드 실패, 릴레이 유지")
+            logger.info(f"[P2P] {agent_id} P2P 업그레이드 실패 (LAN={conn.ip_private or 'N/A'}, "
+                         f"WAN={conn.ip_public or 'N/A'}:{conn.ws_port}), 릴레이 유지")
         finally:
             conn._upgrading = False
 
@@ -576,7 +588,7 @@ class AgentServer(QObject):
             else:
                 await ws.close()
         except Exception as e:
-            logger.debug(f"[P2P] 연결 실패 ({url}): {e}")
+            logger.info(f"[P2P] 연결 실패 ({url}): {type(e).__name__}: {e}")
         return None
 
     async def _close_connection(self, agent_id: str):
@@ -680,6 +692,9 @@ class AgentServer(QObject):
             returncode = msg.get('returncode', -1)
             output = stdout if stdout else stderr
             self.command_result.emit(agent_id, command, output, returncode)
+
+        elif msg_type == 'update_status':
+            self.update_status_received.emit(agent_id, msg)
 
     def _handle_p2p_binary(self, agent_id: str, data: bytes):
         """P2P 직접 연결 바이너리 처리 (32B prefix 없음 — 직접 연결)"""
@@ -792,16 +807,36 @@ class AgentServer(QObject):
 
         if msg_type == 'agent_connected':
             agent_id = source_agent
+            real_ip = msg.get('real_ip', '')
+            ws_port = msg.get('ws_port', 21350)
             if agent_id:
                 conn = self._connections.get(agent_id)
                 if not conn or conn.mode == ConnectionMode.DISCONNECTED:
                     if not conn:
                         conn = AgentConnection(agent_id=agent_id)
                         self._connections[agent_id] = conn
+                    # real_ip를 공인IP로 저장 (P2P 직접 연결에 사용)
+                    if real_ip:
+                        conn.ip_public = real_ip
+                    if ws_port:
+                        conn.ws_port = ws_port
+                    logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} "
+                                f"(real_ip={real_ip or 'N/A'}, ws_port={ws_port})")
                     conn.ws = self._relay_ws
                     conn.mode = ConnectionMode.RELAY
-                    self.agent_connected.emit(agent_id, '')
+                    self.agent_connected.emit(agent_id, real_ip or '')
                     self.connection_mode_changed.emit(agent_id, "relay")
+                    # 릴레이 연결 후 P2P 직접 연결 업그레이드 시도
+                    if real_ip:
+                        asyncio.ensure_future(self._try_p2p_upgrade(agent_id))
+                elif conn.mode == ConnectionMode.RELAY and real_ip:
+                    # 이미 릴레이 연결인데 real_ip가 새로 왔으면 업그레이드 시도
+                    if not conn.ip_public:
+                        conn.ip_public = real_ip
+                    if ws_port:
+                        conn.ws_port = ws_port
+                    if not conn._upgrading:
+                        asyncio.ensure_future(self._try_p2p_upgrade(agent_id))
             return
 
         if msg_type == 'agent_disconnected':
@@ -848,6 +883,8 @@ class AgentServer(QObject):
             stderr = msg.get('stderr', '')
             returncode = msg.get('returncode', -1)
             self.command_result.emit(agent_id, command, stdout if stdout else stderr, returncode)
+        elif msg_type == 'update_status':
+            self.update_status_received.emit(agent_id, msg)
 
     def _handle_relay_binary(self, data: bytes):
         """서버 릴레이 바이너리 처리 (32B prefix 있음 — 기존 방식)"""

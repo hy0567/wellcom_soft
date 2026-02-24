@@ -39,6 +39,7 @@ from models import (
 # 에이전트가 아웃바운드로 연결 → 포트 개방 불필요 폴백
 # ===========================================================
 _relay_agents: dict = {}   # agent_id → WebSocket (에이전트 측)
+_relay_agent_info: dict = {}  # agent_id → {"real_ip": str, "ws_port": int}
 _relay_managers: set = set()  # 연결된 매니저 WebSocket 목록 (set: O(1) 추가/삭제)
 
 # ===========================================================
@@ -99,16 +100,25 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
         return
 
     _relay_agents[agent_id] = websocket
+    # 에이전트의 실제 접속 IP + WS 포트 저장 (NAT 뒤에서도 공인IP 알 수 있음)
+    agent_real_ip = websocket.client.host if websocket.client else ''
+    agent_ws_port = init.get("ws_port", 21350)
+    _relay_agent_info[agent_id] = {"real_ip": agent_real_ip, "ws_port": agent_ws_port}
     await websocket.send_text(json.dumps({"type": "relay_ok"}))
 
-    # 매니저들에게 에이전트 접속 알림
-    notify = json.dumps({"type": "agent_connected", "source_agent": agent_id})
+    # 매니저들에게 에이전트 접속 알림 (real_ip + ws_port 포함 → P2P 직접 연결용)
+    notify = json.dumps({
+        "type": "agent_connected",
+        "source_agent": agent_id,
+        "real_ip": agent_real_ip,
+        "ws_port": agent_ws_port,
+    })
     for m_ws in list(_relay_managers):
         try:
             await m_ws.send_text(notify)
         except Exception:
             pass
-    print(f"[Relay] 에이전트 접속: {agent_id}")
+    print(f"[Relay] 에이전트 접속: {agent_id} (IP: {agent_real_ip})")
 
     try:
         while True:
@@ -146,6 +156,7 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
         pass
     finally:
         _relay_agents.pop(agent_id, None)
+        _relay_agent_info.pop(agent_id, None)
         # 매니저들에게 에이전트 해제 알림
         notify = json.dumps({"type": "agent_disconnected", "source_agent": agent_id})
         for m_ws in list(_relay_managers):
@@ -171,12 +182,16 @@ async def ws_manager_relay(websocket: WebSocket, token: str = Query(default=""))
     _relay_managers.add(websocket)
     await websocket.send_text(json.dumps({"type": "relay_ok"}))
 
-    # 현재 연결된 에이전트 목록 전달
+    # 현재 연결된 에이전트 목록 전달 (real_ip + ws_port 포함)
     for aid in list(_relay_agents.keys()):
         try:
-            await websocket.send_text(
-                json.dumps({"type": "agent_connected", "source_agent": aid})
-            )
+            info = _relay_agent_info.get(aid, {})
+            await websocket.send_text(json.dumps({
+                "type": "agent_connected",
+                "source_agent": aid,
+                "real_ip": info.get("real_ip", ""),
+                "ws_port": info.get("ws_port", 21350),
+            }))
         except Exception:
             pass
     print(f"[Relay] 매니저 접속 (릴레이 에이전트: {len(_relay_agents)}개)")

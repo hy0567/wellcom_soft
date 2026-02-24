@@ -161,6 +161,44 @@ class PCThumbnailWidget(QFrame):
             self.version_label.setStyleSheet("color: #2ecc71;")
         self.update_btn.setVisible(needs_update)
 
+    def set_update_status(self, status: str, **kwargs):
+        """업데이트 진행 상태 표시"""
+        if status == 'checking':
+            self.update_btn.setText("확인 중...")
+            self.update_btn.setEnabled(False)
+        elif status == 'downloading':
+            pct = kwargs.get('progress', 0)
+            self.update_btn.setText(f"다운로드 {pct}%")
+            self.update_btn.setEnabled(False)
+        elif status == 'restarting':
+            ver = kwargs.get('version', '')
+            self.update_btn.setText(f"재시작...")
+            self.update_btn.setEnabled(False)
+        elif status == 'up_to_date':
+            self.update_btn.setText("최신")
+            self.update_btn.setEnabled(False)
+            self.update_btn.setStyleSheet(
+                "QPushButton { background-color: #27ae60; color: white; border: none;"
+                " border-radius: 3px; padding: 0 6px; }"
+            )
+        elif status == 'failed':
+            self.update_btn.setText("실패")
+            self.update_btn.setEnabled(True)
+            self.update_btn.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; border: none;"
+                " border-radius: 3px; padding: 0 6px; }"
+                "QPushButton:hover { background-color: #c0392b; }"
+            )
+        else:
+            # 원래 상태로 복원
+            self.update_btn.setText("업데이트")
+            self.update_btn.setEnabled(True)
+            self.update_btn.setStyleSheet(
+                "QPushButton { background-color: #e67e22; color: white; border: none;"
+                " border-radius: 3px; padding: 0 6px; }"
+                "QPushButton:hover { background-color: #d35400; }"
+            )
+
     def update_mode(self, mode: str):
         """연결 모드 배지 갱신 (lan / wan / relay / '')"""
         MODE_STYLES = {
@@ -290,6 +328,7 @@ class GridView(QScrollArea):
         agent_server.agent_connected.connect(self._on_agent_connected)
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
         agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
+        agent_server.update_status_received.connect(self._on_update_status)
 
         # 썸네일 갱신 타이머
         frame_speed = settings.get('grid_view.frame_speed', 5)
@@ -423,7 +462,25 @@ class GridView(QScrollArea):
         pc = self.pc_manager.get_pc(pc_name)
         if pc:
             logger.info(f"[업데이트] {pc_name} ({pc.agent_id}) 원격 업데이트 요청")
+            # 버튼 즉시 피드백
+            thumb = self._thumbnails.get(pc_name)
+            if thumb:
+                thumb.set_update_status('checking')
             self.agent_server.send_update_request(pc.agent_id)
+
+    def _on_update_status(self, agent_id: str, status_dict: dict):
+        """에이전트 업데이트 상태 수신"""
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if not pc:
+            return
+        thumb = self._thumbnails.get(pc.name)
+        if not thumb:
+            return
+        status = status_dict.get('status', '')
+        logger.info(f"[업데이트] {pc.name} 상태: {status}")
+        thumb.set_update_status(status, **{
+            k: v for k, v in status_dict.items() if k != 'type' and k != 'status'
+        })
 
     def get_selected_agent_ids(self) -> list:
         """선택된 PC들의 agent_id 목록"""

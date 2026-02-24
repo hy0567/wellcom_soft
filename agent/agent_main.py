@@ -650,6 +650,7 @@ class WellcomAgent:
                     await ws.send(json.dumps({
                         'type': 'agent_hello',
                         'agent_id': self._agent_id,
+                        'ws_port': self._ws_port,
                     }))
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     resp = json.loads(raw)
@@ -1179,11 +1180,64 @@ class WellcomAgent:
 
         elif msg_type == 'update_request':
             # 매니저가 업데이트 명령 전송 → 백그라운드 스레드에서 헤드리스 업데이트
-            await websocket.send(json.dumps({'type': 'update_started'}))
+            await websocket.send(json.dumps({
+                'type': 'update_status', 'status': 'checking',
+            }))
             threading.Thread(
-                target=_check_and_apply_update,
+                target=self._run_remote_update,
+                args=(websocket,),
                 daemon=True, name='UpdateWorker'
             ).start()
+
+    def _run_remote_update(self, ws):
+        """원격 업데이트 실행 (백그라운드 스레드 — 매니저에 진행상황 전송)"""
+        def send_status(status: str, **kwargs):
+            msg = json.dumps({'type': 'update_status', 'status': status, **kwargs})
+            try:
+                fut = asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
+                fut.result(timeout=5)
+            except Exception:
+                pass
+
+        try:
+            from pathlib import Path
+            from updater import UpdateChecker
+
+            try:
+                from version import __version__, __github_repo__, __asset_name__
+            except ImportError:
+                __version__ = "0.0.0"
+                __github_repo__ = "hy0567/wellcom_soft"
+                __asset_name__ = "agent.zip"
+
+            checker = UpdateChecker(
+                Path(AGENT_BASE_DIR), __github_repo__,
+                asset_name=__asset_name__,
+                running_version=__version__,
+            )
+
+            has_update, release = checker.check_update()
+            if not has_update:
+                send_status('up_to_date', version=__version__)
+                return
+
+            send_status('downloading', version=release.version, progress=0)
+
+            def progress_cb(downloaded, total):
+                if total > 0:
+                    pct = int(downloaded * 100 / total)
+                    send_status('downloading', version=release.version, progress=pct)
+
+            success = checker.apply_update(release, progress_callback=progress_cb)
+            if success:
+                send_status('restarting', version=release.version)
+                time.sleep(1)
+                _restart_agent()
+            else:
+                send_status('failed', error='업데이트 적용 실패')
+        except Exception as e:
+            logger.error(f"원격 업데이트 실패: {e}")
+            send_status('failed', error=str(e))
 
     async def _handle_binary(self, websocket, data: bytes, manager_id: str):
         """바이너리 프레임 처리 (파일 청크)"""

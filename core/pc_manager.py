@@ -239,11 +239,16 @@ class PCManager:
             if self._is_manager_pc(agent_id, agent_hostname):
                 continue
             if agent_data.get('is_online'):
+                ip_private = agent_data.get('ip', '')
+                ip_public = agent_data.get('ip_public', '')
+                ws_port = agent_data.get('ws_port', 21350)
+                logger.info(f"[서버동기화] {agent_id}: ip={ip_private}, "
+                            f"ip_public={ip_public or '(없음)'}, ws_port={ws_port}")
                 self.agent_server.connect_to_agent(
                     agent_id=agent_id,
-                    ip_private=agent_data.get('ip', ''),
-                    ip_public=agent_data.get('ip_public', ''),
-                    ws_port=agent_data.get('ws_port', 21350),
+                    ip_private=ip_private,
+                    ip_public=ip_public,
+                    ws_port=ws_port,
                 )
                 p2p_count += 1
 
