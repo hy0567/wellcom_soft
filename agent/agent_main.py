@@ -287,6 +287,8 @@ def _show_update_ui() -> bool:
 # 바이너리 프레임 헤더
 HEADER_THUMBNAIL = 0x01
 HEADER_STREAM = 0x02
+HEADER_H264_KEYFRAME = 0x03
+HEADER_H264_DELTA = 0x04
 
 
 def _get_public_ip() -> str:
@@ -496,6 +498,7 @@ class WellcomAgent:
         self._stream_tasks: Dict[str, asyncio.Task] = {}
         self._thumbnail_tasks: Dict[str, asyncio.Task] = {}
         self._stream_settings: Dict[str, dict] = {}  # manager_id → {fps, quality}
+        self._h264_encoders: Dict[str, object] = {}  # manager_id → H264Encoder
 
     def _get_system_info(self) -> dict:
         """시스템 정보 수집"""
@@ -1016,6 +1019,13 @@ class WellcomAgent:
                 if task:
                     task.cancel()
                 self._stream_settings.pop(manager_id, None)
+                # H.264 인코더 정리
+                enc = self._h264_encoders.pop(manager_id, None)
+                if enc:
+                    try:
+                        enc.close()
+                    except Exception:
+                        pass
                 logger.info(f"매니저 해제: {manager_id}")
 
     async def _handle_text(self, websocket, raw: str, manager_id: str):
@@ -1036,12 +1046,26 @@ class WellcomAgent:
         elif msg_type == 'start_stream':
             fps = msg.get('fps', self.config.screen_fps)
             quality = msg.get('quality', self.config.screen_quality)
+            codec = msg.get('codec', 'mjpeg')
+            keyframe_interval = msg.get('keyframe_interval', 60)
             # 기존 스트림 태스크 취소
             old_task = self._stream_tasks.get(manager_id)
             if old_task:
                 old_task.cancel()
-            self._stream_settings[manager_id] = {'fps': fps, 'quality': quality}
-            task = asyncio.create_task(self._start_streaming(websocket, fps, quality, manager_id))
+            # 기존 H.264 인코더 정리
+            old_enc = self._h264_encoders.pop(manager_id, None)
+            if old_enc:
+                try:
+                    old_enc.close()
+                except Exception:
+                    pass
+            self._stream_settings[manager_id] = {
+                'fps': fps, 'quality': quality,
+                'codec': codec, 'keyframe_interval': keyframe_interval,
+            }
+            task = asyncio.create_task(
+                self._start_streaming(websocket, fps, quality, manager_id,
+                                      codec=codec, keyframe_interval=keyframe_interval))
             self._stream_tasks[manager_id] = task
 
         elif msg_type == 'update_stream':
@@ -1053,12 +1077,32 @@ class WellcomAgent:
             if quality is not None:
                 settings['quality'] = quality
             self._stream_settings[manager_id] = settings
+            # H.264 인코더 동적 업데이트
+            encoder = self._h264_encoders.get(manager_id)
+            if encoder:
+                if quality is not None:
+                    encoder.update_quality(quality)
+                if fps is not None:
+                    encoder.update_fps(fps)
 
         elif msg_type == 'stop_stream':
             task = self._stream_tasks.pop(manager_id, None)
             if task:
                 task.cancel()
             self._stream_settings.pop(manager_id, None)
+            # H.264 인코더 정리
+            enc = self._h264_encoders.pop(manager_id, None)
+            if enc:
+                try:
+                    enc.close()
+                except Exception:
+                    pass
+
+        elif msg_type == 'request_keyframe':
+            encoder = self._h264_encoders.get(manager_id)
+            if encoder:
+                encoder.force_keyframe()
+                logger.debug(f"[{manager_id}] 키프레임 강제 요청")
 
         elif msg_type == 'start_thumbnail_push':
             interval = msg.get('interval', 1.0)
@@ -1184,10 +1228,45 @@ class WellcomAgent:
         finally:
             logger.info(f"[{manager_id}] 썸네일 push 중지")
 
-    async def _start_streaming(self, websocket, fps: int, quality: int, manager_id: str):
-        """화면 스트리밍 시작 (매니저별 독립)"""
+    async def _start_streaming(self, websocket, fps: int, quality: int, manager_id: str,
+                               codec: str = 'mjpeg', keyframe_interval: int = 60):
+        """화면 스트리밍 시작 (매니저별 독립, MJPEG/H.264 코덱 지원)"""
         interval = 1.0 / max(1, fps)
-        logger.info(f"[{manager_id}] 스트리밍 시작: {fps}fps, quality={quality}")
+        actual_codec = codec
+        encoder = None
+        encoder_name = ''
+
+        # H.264 인코더 초기화 시도
+        if codec == 'h264':
+            try:
+                from h264_encoder import H264Encoder
+                screen_w, screen_h = self.screen_capture.screen_size
+                encoder = H264Encoder(screen_w, screen_h, fps=fps,
+                                      quality=quality, gop_size=keyframe_interval)
+                encoder_name = encoder.encoder_name
+                self._h264_encoders[manager_id] = encoder
+                logger.info(f"[{manager_id}] H.264 인코더 활성화: {encoder_name}")
+            except Exception as e:
+                logger.warning(f"[{manager_id}] H.264 인코더 초기화 실패 ({e}) — MJPEG 폴백")
+                actual_codec = 'mjpeg'
+                encoder = None
+
+        # stream_started 응답 전송 (매니저에 실제 코덱 알림)
+        screen_w, screen_h = self.screen_capture.screen_size
+        try:
+            await websocket.send(json.dumps({
+                'type': 'stream_started',
+                'codec': actual_codec,
+                'encoder': encoder_name,
+                'width': screen_w,
+                'height': screen_h,
+                'fps': fps,
+                'quality': quality,
+            }))
+        except Exception:
+            pass
+
+        logger.info(f"[{manager_id}] 스트리밍 시작: codec={actual_codec}, {fps}fps, Q={quality}")
 
         try:
             while self._running:
@@ -1196,8 +1275,19 @@ class WellcomAgent:
                 cur_fps = settings.get('fps', fps)
                 cur_interval = 1.0 / max(1, cur_fps)
 
-                jpeg_data = self.screen_capture.capture_jpeg(quality=cur_quality)
-                await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                if actual_codec == 'h264' and encoder:
+                    # H.264 경로: raw 캡처 → 인코딩 → NAL 전송
+                    raw_img = self.screen_capture.capture_raw()
+                    if raw_img:
+                        packets = encoder.encode_frame(raw_img)
+                        for is_key, nal_bytes in packets:
+                            header = HEADER_H264_KEYFRAME if is_key else HEADER_H264_DELTA
+                            await websocket.send(bytes([header]) + nal_bytes)
+                else:
+                    # MJPEG 경로 (기존)
+                    jpeg_data = self.screen_capture.capture_jpeg(quality=cur_quality)
+                    await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+
                 await asyncio.sleep(cur_interval)
         except asyncio.CancelledError:
             pass
@@ -1206,9 +1296,16 @@ class WellcomAgent:
         except Exception as e:
             logger.debug(f"[{manager_id}] 스트리밍 오류: {e}")
         finally:
+            # H.264 인코더 정리
+            enc = self._h264_encoders.pop(manager_id, None)
+            if enc:
+                try:
+                    enc.close()
+                except Exception:
+                    pass
             self._stream_tasks.pop(manager_id, None)
             self._stream_settings.pop(manager_id, None)
-            logger.info(f"[{manager_id}] 스트리밍 중지")
+            logger.info(f"[{manager_id}] 스트리밍 중지 (codec={actual_codec})")
 
     async def _execute_command(self, websocket, command: str):
         """원격 명령 실행"""
