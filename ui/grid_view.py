@@ -143,7 +143,9 @@ class PCThumbnailWidget(QFrame):
             self.update_btn.setVisible(False)
             return
 
-        self.version_label.setText(f'v{agent_version}')
+        # '0.0.0'은 버전 미보고 에이전트 플레이스홀더
+        display = 'v?' if agent_version == '0.0.0' else f'v{agent_version}'
+        self.version_label.setText(display)
         needs_update = False
         if manager_version:
             try:
@@ -326,6 +328,9 @@ class GridView(QScrollArea):
             thumb.update_requested.connect(self._on_update_requested)
 
             agent_version = getattr(pc.info, 'agent_version', '')
+            # 온라인이지만 버전 미보고 에이전트 → 구버전으로 간주
+            if not agent_version and pc.is_online:
+                agent_version = '0.0.0'
             thumb.update_version(agent_version, MANAGER_VERSION)
 
             conn_mode = getattr(pc.info, 'connection_mode', '')

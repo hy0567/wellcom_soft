@@ -989,6 +989,7 @@ class WellcomAgent:
                 'os_info': f"{platform.system()} {platform.release()} {platform.version()}",
                 'screen_width': screen_w,
                 'screen_height': screen_h,
+                'agent_version': self._agent_version,
             }))
             logger.info(f"매니저 연결: {manager_id} ({remote_ip})")
 

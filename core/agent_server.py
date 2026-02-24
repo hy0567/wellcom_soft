@@ -454,13 +454,15 @@ class AgentServer(QObject):
 
         # 1단계: LAN (ip2) 직접 연결
         if conn.ip_private:
-            ws = await self._try_p2p_connect(
+            result = await self._try_p2p_connect(
                 f"ws://{conn.ip_private}:{conn.ws_port}",
                 timeout=self._timeout_lan,
             )
-            if ws:
+            if result:
+                ws, auth_info = result
                 conn.ws = ws
                 conn.mode = ConnectionMode.LAN
+                conn.info = auth_info
                 logger.info(f"[P2P] {agent_id} LAN 연결 성공: {conn.ip_private}:{conn.ws_port}")
                 self.agent_connected.emit(agent_id, conn.ip_private)
                 self.connection_mode_changed.emit(agent_id, "lan")
@@ -469,13 +471,15 @@ class AgentServer(QObject):
 
         # 2단계: WAN (ip1) 직접 연결
         if conn.ip_public:
-            ws = await self._try_p2p_connect(
+            result = await self._try_p2p_connect(
                 f"ws://{conn.ip_public}:{conn.ws_port}",
                 timeout=self._timeout_wan,
             )
-            if ws:
+            if result:
+                ws, auth_info = result
                 conn.ws = ws
                 conn.mode = ConnectionMode.WAN
+                conn.info = auth_info
                 logger.info(f"[P2P] {agent_id} WAN 연결 성공: {conn.ip_public}:{conn.ws_port}")
                 self.agent_connected.emit(agent_id, conn.ip_public)
                 self.connection_mode_changed.emit(agent_id, "wan")
@@ -506,13 +510,15 @@ class AgentServer(QObject):
         try:
             # 1단계: LAN 시도
             if conn.ip_private:
-                ws = await self._try_p2p_connect(
+                result = await self._try_p2p_connect(
                     f"ws://{conn.ip_private}:{conn.ws_port}",
                     timeout=self._timeout_lan,
                 )
-                if ws:
+                if result:
+                    ws, auth_info = result
                     conn.ws = ws
                     conn.mode = ConnectionMode.LAN
+                    conn.info = auth_info
                     logger.info(f"[P2P] {agent_id} 릴레이→LAN 업그레이드: {conn.ip_private}:{conn.ws_port}")
                     self.connection_mode_changed.emit(agent_id, "lan")
                     conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
@@ -520,13 +526,15 @@ class AgentServer(QObject):
 
             # 2단계: WAN 시도
             if conn.ip_public:
-                ws = await self._try_p2p_connect(
+                result = await self._try_p2p_connect(
                     f"ws://{conn.ip_public}:{conn.ws_port}",
                     timeout=self._timeout_wan,
                 )
-                if ws:
+                if result:
+                    ws, auth_info = result
                     conn.ws = ws
                     conn.mode = ConnectionMode.WAN
+                    conn.info = auth_info
                     logger.info(f"[P2P] {agent_id} 릴레이→WAN 업그레이드: {conn.ip_public}:{conn.ws_port}")
                     self.connection_mode_changed.emit(agent_id, "wan")
                     conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
@@ -538,7 +546,11 @@ class AgentServer(QObject):
             conn._upgrading = False
 
     async def _try_p2p_connect(self, url: str, timeout: int = 3):
-        """P2P 직접 WS 연결 시도 + 인증 핸드셰이크"""
+        """P2P 직접 WS 연결 시도 + 인증 핸드셰이크
+
+        Returns:
+            (ws, auth_info) 또는 None. auth_info는 auth_ok 메시지 dict.
+        """
         try:
             ws = await asyncio.wait_for(
                 websockets.connect(
@@ -560,7 +572,7 @@ class AgentServer(QObject):
             raw = await asyncio.wait_for(ws.recv(), timeout=5)
             msg = json.loads(raw)
             if msg.get('type') == 'auth_ok':
-                return ws
+                return ws, msg
             else:
                 await ws.close()
         except Exception as e:
@@ -771,6 +783,7 @@ class AgentServer(QObject):
                         'ip': msg.get('ip', ''),
                         'screen_width': msg.get('screen_width', 1920),
                         'screen_height': msg.get('screen_height', 1080),
+                        'agent_version': msg.get('agent_version', ''),
                     }
                     self.agent_connected.emit(agent_id, msg.get('ip', ''))
                     self.connection_mode_changed.emit(agent_id, "relay")

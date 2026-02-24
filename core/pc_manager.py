@@ -411,11 +411,15 @@ class PCManager:
 
         with self._lock:
             pc.mark_online(ws, ip)
-            # P2P 연결 모드 저장
+            # P2P 연결 매니저 정보 저장
             if conn:
                 pc.info.public_ip = conn.ip_public
                 pc.info.ws_port = conn.ws_port
                 pc.info.connection_mode = conn.mode.value
+                # auth_ok에서 전달된 agent_version 저장
+                conn_info = conn.info or {}
+                if conn_info.get('agent_version'):
+                    pc.info.agent_version = conn_info['agent_version']
 
             # DB에 IP 업데이트
             db_row = self.db.get_pc_by_name(pc.name)
