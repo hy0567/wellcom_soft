@@ -228,6 +228,29 @@ class PCThumbnailWidget(QFrame):
             ))
 
 
+class PlaceholderSlotWidget(QFrame):
+    """빈 슬롯 위젯 — 에이전트가 없는 그리드 칸"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setMinimumSize(200, 150)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet("""
+            PlaceholderSlotWidget {
+                background-color: #1e1e1e;
+                border: 2px dashed #2a2a2a;
+                border-radius: 6px;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl = QLabel("＋")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("color: #2a2a2a; font-size: 32px; background: transparent;")
+        layout.addWidget(lbl)
+
+
 class GridView(QScrollArea):
     """다중 PC 썸네일 그리드 (LinkIO 스타일)"""
 
@@ -240,6 +263,7 @@ class GridView(QScrollArea):
         self.pc_manager = pc_manager
         self.agent_server = agent_server
         self._thumbnails: Dict[str, PCThumbnailWidget] = {}
+        self._placeholders: list = []
         self._selected_pcs: set = set()
         self._push_agents: set = set()
 
@@ -279,8 +303,15 @@ class GridView(QScrollArea):
             widget.deleteLater()
         self._thumbnails.clear()
 
+        # 플레이스홀더 정리
+        for ph in self._placeholders:
+            self._grid.removeWidget(ph)
+            ph.deleteLater()
+        self._placeholders.clear()
+
         pcs = self.pc_manager.get_all_pcs()
         columns = self._calculate_columns()
+        count = len(pcs)
 
         for i, pc in enumerate(pcs):
             row = i // columns
@@ -308,6 +339,18 @@ class GridView(QScrollArea):
 
             self._grid.addWidget(thumb, row, col)
             self._thumbnails[pc.name] = thumb
+
+        # 마지막 행 빈 슬롯을 플레이스홀더로 채우기
+        # 에이전트가 0개이면 columns 개, 아니면 마지막 행의 나머지 칸 수만큼
+        remainder = count % columns
+        ph_count = (columns - remainder) % columns if count > 0 else columns
+        for j in range(ph_count):
+            i = count + j
+            row = i // columns
+            col = i % columns
+            ph = PlaceholderSlotWidget()
+            self._grid.addWidget(ph, row, col)
+            self._placeholders.append(ph)
 
     def _calculate_columns(self) -> int:
         user_cols = settings.get('grid_view.columns', 5)

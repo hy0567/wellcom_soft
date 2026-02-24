@@ -59,6 +59,7 @@ class AgentConnection:
     ws_port: int = 21350
     info: dict = field(default_factory=dict)
     _recv_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    _upgrading: bool = field(default=False, repr=False)  # P2P 업그레이드 진행 중
 
 
 class AgentServer(QObject):
@@ -158,10 +159,18 @@ class AgentServer(QObject):
         """에이전트에 P2P 연결 시도 (LAN→WAN→릴레이)"""
         conn = self._connections.get(agent_id)
         if conn and conn.mode != ConnectionMode.DISCONNECTED:
-            # 이미 연결됨 — IP 정보만 업데이트
+            # 이미 연결됨 — IP 정보 업데이트
             conn.ip_private = ip_private
             conn.ip_public = ip_public
             conn.ws_port = ws_port
+            # 릴레이 모드이고 직접 IP가 있으면 → P2P 업그레이드 시도
+            if (conn.mode == ConnectionMode.RELAY
+                    and not conn._upgrading
+                    and (ip_private or ip_public)):
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._try_p2p_upgrade(agent_id), self._loop
+                    )
             return
 
         conn = AgentConnection(
@@ -486,6 +495,47 @@ class AgentServer(QObject):
         # 전부 실패
         conn.mode = ConnectionMode.DISCONNECTED
         logger.warning(f"[P2P] {agent_id} 연결 실패 (LAN/WAN/릴레이)")
+
+    async def _try_p2p_upgrade(self, agent_id: str):
+        """릴레이 → P2P 직접 연결 업그레이드 시도 (실패 시 릴레이 유지)"""
+        conn = self._connections.get(agent_id)
+        if not conn or conn.mode != ConnectionMode.RELAY:
+            return
+
+        conn._upgrading = True
+        try:
+            # 1단계: LAN 시도
+            if conn.ip_private:
+                ws = await self._try_p2p_connect(
+                    f"ws://{conn.ip_private}:{conn.ws_port}",
+                    timeout=self._timeout_lan,
+                )
+                if ws:
+                    conn.ws = ws
+                    conn.mode = ConnectionMode.LAN
+                    logger.info(f"[P2P] {agent_id} 릴레이→LAN 업그레이드: {conn.ip_private}:{conn.ws_port}")
+                    self.connection_mode_changed.emit(agent_id, "lan")
+                    conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                    return
+
+            # 2단계: WAN 시도
+            if conn.ip_public:
+                ws = await self._try_p2p_connect(
+                    f"ws://{conn.ip_public}:{conn.ws_port}",
+                    timeout=self._timeout_wan,
+                )
+                if ws:
+                    conn.ws = ws
+                    conn.mode = ConnectionMode.WAN
+                    logger.info(f"[P2P] {agent_id} 릴레이→WAN 업그레이드: {conn.ip_public}:{conn.ws_port}")
+                    self.connection_mode_changed.emit(agent_id, "wan")
+                    conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                    return
+
+            # P2P 실패 — 릴레이 유지
+            logger.debug(f"[P2P] {agent_id} P2P 업그레이드 실패, 릴레이 유지")
+        finally:
+            conn._upgrading = False
 
     async def _try_p2p_connect(self, url: str, timeout: int = 3):
         """P2P 직접 WS 연결 시도 + 인증 핸드셰이크"""
