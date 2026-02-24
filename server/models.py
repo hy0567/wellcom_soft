@@ -57,15 +57,22 @@ class AgentRegister(BaseModel):
     mac_address: str = ""
     screen_width: int = 1920
     screen_height: int = 1080
+    agent_version: str = ""  # 에이전트 소프트웨어 버전 (업데이터용)
+    cpu_model: str = ""
+    cpu_cores: int = 0
+    ram_gb: float = 0.0
+    motherboard: str = ""
+    gpu_model: str = ""
 
 
 class AgentHeartbeat(BaseModel):
     agent_id: str
     ip: str = ""
-    ip_public: str = ""     # 공인IP (P2P용)
-    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
+    ip_public: str = ""
+    ws_port: int = 21350
     screen_width: int = 1920
     screen_height: int = 1080
+    agent_version: str = ""  # 에이전트 소프트웨어 버전 (업데이터용)
 
 
 class AgentResponse(BaseModel):
@@ -74,8 +81,8 @@ class AgentResponse(BaseModel):
     hostname: str
     os_info: str = ""
     ip: str = ""
-    ip_public: str = ""     # 공인IP (P2P용)
-    ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
+    ip_public: str = ""
+    ws_port: int = 21350
     mac_address: str = ""
     screen_width: int = 1920
     screen_height: int = 1080
@@ -85,25 +92,12 @@ class AgentResponse(BaseModel):
     owner_id: int = 0
     owner_username: str = ""
     last_seen: Optional[str] = None
-
-
-# === Manager (매니저 PC) ===
-class ManagerRegister(BaseModel):
-    ip: str
-    ws_port: int = 4797
-
-
-class ManagerHeartbeat(BaseModel):
-    ip: str = ""
-
-
-class ManagerResponse(BaseModel):
-    id: int
-    owner_id: int
-    ip: str
-    ws_port: int = 4797
-    is_online: bool = False
-    last_seen: Optional[str] = None
+    agent_version: str = ""  # 에이전트 소프트웨어 버전 (업데이터용)
+    cpu_model: str = ""
+    cpu_cores: int = 0
+    ram_gb: float = 0.0
+    motherboard: str = ""
+    gpu_model: str = ""
 
 
 # === Groups ===

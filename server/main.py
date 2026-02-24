@@ -1,25 +1,26 @@
 """
 WellcomSOFT API 서버
-FastAPI + MySQL + JWT 인증 + WebSocket 릴레이
+FastAPI + MySQL + JWT 인증
 
 핵심 흐름:
 1. 에이전트(대상PC)가 서버에 로그인 → JWT 토큰 획득
 2. 에이전트가 /api/agents/register로 자신을 등록 (owner_id = 로그인 사용자)
-3. 매니저(관리PC)가 같은 계정으로 로그인 → /ws/manager?token=JWT 로 WS 접속
-4. 에이전트가 /ws/agent?token=JWT 로 WS 접속
-5. 서버가 같은 owner_id의 매니저↔에이전트 간 메시지를 양방향 릴레이
-6. 포트포워딩 불필요 — 매니저/에이전트 모두 서버에 접속
+3. 에이전트가 /api/agents/heartbeat로 주기적으로 상태 보고
+4. 매니저(관리PC)가 같은 계정으로 로그인 → /api/agents로 해당 사용자의 에이전트 목록 조회
+5. 매니저가 에이전트의 IP를 알아내서 WebSocket 직접 연결
+   OR 포트 개방 불가 시 → /ws/manager, /ws/agent 릴레이를 통해 서버 중계
 """
-import os
-import json
 import asyncio
-import logging
-from datetime import datetime, timezone
-from typing import Dict, Optional
+import json
+import os
+import secrets
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.websockets import WebSocketState
 
 from auth import (
     hash_password, verify_password, create_token,
@@ -31,14 +32,31 @@ from models import (
     UserCreate, UserUpdate, UserResponse,
     AgentRegister, AgentHeartbeat, AgentResponse,
     GroupCreate, GroupResponse,
-    ManagerRegister, ManagerHeartbeat, ManagerResponse,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-)
-logger = logging.getLogger("ws_relay")
+# ===========================================================
+# 서버 릴레이 상태 (메모리, 단일 프로세스)
+# 에이전트가 아웃바운드로 연결 → 포트 개방 불필요 폴백
+# ===========================================================
+_relay_agents: dict = {}   # agent_id → WebSocket (에이전트 측)
+_relay_managers: set = set()  # 연결된 매니저 WebSocket 목록 (set: O(1) 추가/삭제)
+
+# ===========================================================
+# 로그인 속도 제한 (브루트포스 방지)
+# ===========================================================
+_login_attempts: dict = defaultdict(list)   # IP → [timestamp, ...]
+RATE_LIMIT_WINDOW = 60      # 초
+RATE_LIMIT_MAX = 10         # 창당 최대 시도
+
+RELAY_AGENT_ID_LEN = 32
+
+
+def _relay_pad(agent_id: str) -> bytes:
+    return agent_id.encode("utf-8")[:RELAY_AGENT_ID_LEN].ljust(RELAY_AGENT_ID_LEN, b"\x00")
+
+
+def _relay_unpad(data: bytes) -> str:
+    return data[:RELAY_AGENT_ID_LEN].rstrip(b"\x00").decode("utf-8", errors="replace")
 
 app = FastAPI(title="WellcomSOFT API", version="1.0.0")
 
@@ -51,10 +69,167 @@ app.add_middleware(
 
 
 # ===========================================================
+# WebSocket 릴레이 (포트 21350 개방 불가 시 폴백)
+# ===========================================================
+
+@app.websocket("/ws/agent")
+async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
+    """에이전트 → 서버 아웃바운드 릴레이 연결 (포트 개방 불필요)"""
+    await websocket.accept()
+
+    # JWT 검증
+    try:
+        payload = decode_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    # 에이전트 hello 핸드셰이크
+    agent_id = None
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        init = json.loads(raw)
+        if init.get("type") == "agent_hello":
+            agent_id = str(init.get("agent_id", "")).strip()
+    except Exception:
+        pass
+
+    if not agent_id:
+        await websocket.close(code=4000, reason="No agent_id")
+        return
+
+    _relay_agents[agent_id] = websocket
+    await websocket.send_text(json.dumps({"type": "relay_ok"}))
+
+    # 매니저들에게 에이전트 접속 알림
+    notify = json.dumps({"type": "agent_connected", "source_agent": agent_id})
+    for m_ws in list(_relay_managers):
+        try:
+            await m_ws.send_text(notify)
+        except Exception:
+            pass
+    print(f"[Relay] 에이전트 접속: {agent_id}")
+
+    try:
+        while True:
+            data = await websocket.receive()
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            text = data.get("text")
+            raw_bytes = data.get("bytes")
+
+            if text:
+                # JSON: source_agent 추가 후 모든 매니저에게 브로드캐스트
+                try:
+                    msg = json.loads(text)
+                except Exception:
+                    continue
+                msg["source_agent"] = agent_id
+                fwd = json.dumps(msg)
+                for m_ws in list(_relay_managers):
+                    try:
+                        await m_ws.send_text(fwd)
+                    except Exception:
+                        pass
+
+            elif raw_bytes:
+                # 바이너리: 32B agent_id 접두어 추가 후 브로드캐스트
+                fwd = _relay_pad(agent_id) + raw_bytes
+                for m_ws in list(_relay_managers):
+                    try:
+                        await m_ws.send_bytes(fwd)
+                    except Exception:
+                        pass
+
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _relay_agents.pop(agent_id, None)
+        # 매니저들에게 에이전트 해제 알림
+        notify = json.dumps({"type": "agent_disconnected", "source_agent": agent_id})
+        for m_ws in list(_relay_managers):
+            try:
+                await m_ws.send_text(notify)
+            except Exception:
+                pass
+        print(f"[Relay] 에이전트 해제: {agent_id}")
+
+
+@app.websocket("/ws/manager")
+async def ws_manager_relay(websocket: WebSocket, token: str = Query(default="")):
+    """매니저 → 서버 릴레이 연결 (P2P 실패 시 폴백)"""
+    await websocket.accept()
+
+    # JWT 검증
+    try:
+        decode_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    _relay_managers.add(websocket)
+    await websocket.send_text(json.dumps({"type": "relay_ok"}))
+
+    # 현재 연결된 에이전트 목록 전달
+    for aid in list(_relay_agents.keys()):
+        try:
+            await websocket.send_text(
+                json.dumps({"type": "agent_connected", "source_agent": aid})
+            )
+        except Exception:
+            pass
+    print(f"[Relay] 매니저 접속 (릴레이 에이전트: {len(_relay_agents)}개)")
+
+    try:
+        while True:
+            data = await websocket.receive()
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            text = data.get("text")
+            raw_bytes = data.get("bytes")
+
+            if text:
+                # JSON: target_agent 추출 → 해당 에이전트에 전달
+                try:
+                    msg = json.loads(text)
+                except Exception:
+                    continue
+                target = msg.pop("target_agent", None)
+                if target:
+                    agent_ws = _relay_agents.get(target)
+                    if agent_ws:
+                        try:
+                            await agent_ws.send_text(json.dumps(msg))
+                        except Exception:
+                            pass
+
+            elif raw_bytes:
+                # 바이너리: 앞 32B = target agent_id
+                if len(raw_bytes) < RELAY_AGENT_ID_LEN + 1:
+                    continue
+                target = _relay_unpad(raw_bytes[:RELAY_AGENT_ID_LEN])
+                payload = raw_bytes[RELAY_AGENT_ID_LEN:]
+                agent_ws = _relay_agents.get(target)
+                if agent_ws:
+                    try:
+                        await agent_ws.send_bytes(payload)
+                    except Exception:
+                        pass
+
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _relay_managers.discard(websocket)
+        print("[Relay] 매니저 해제")
+
+
+# ===========================================================
 # 시작 시 테이블 초기화
 # ===========================================================
 @app.on_event("startup")
-def startup_init():
+async def startup_init():
     with get_db() as conn:
         with conn.cursor() as cur:
             # users 테이블
@@ -106,25 +281,16 @@ def startup_init():
                 )
             """)
 
-            # managers 테이블 (매니저 = 관리 PC)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS managers (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    owner_id INT NOT NULL,
-                    ip VARCHAR(50) NOT NULL,
-                    ws_port INT DEFAULT 4797,
-                    is_online BOOLEAN DEFAULT FALSE,
-                    last_seen DATETIME,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uq_manager_owner (owner_id),
-                    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-            """)
-
-            # agents 테이블에 P2P용 필드 추가 (v3.0.0)
+            # P2P용 컬럼 추가 (v3.0.0) + 업데이터용 컬럼 (v3.1.0) + 하드웨어 컬럼 (v3.0.7)
             for col_name, col_def in [
                 ('ip_public', "VARCHAR(50) DEFAULT ''"),
                 ('ws_port', "INT DEFAULT 21350"),
+                ('agent_version', "VARCHAR(20) DEFAULT ''"),
+                ('cpu_model', "VARCHAR(255) DEFAULT ''"),
+                ('cpu_cores', "INT DEFAULT 0"),
+                ('ram_gb', "FLOAT DEFAULT 0.0"),
+                ('motherboard', "VARCHAR(255) DEFAULT ''"),
+                ('gpu_model', "VARCHAR(255) DEFAULT ''"),
             ]:
                 try:
                     cur.execute(f"ALTER TABLE agents ADD COLUMN {col_name} {col_def}")
@@ -136,12 +302,18 @@ def startup_init():
             cur.execute("SELECT id, password FROM users WHERE username = 'admin'")
             admin = cur.fetchone()
             if not admin:
-                hashed = hash_password("admin")
+                # 최초 생성: 무작위 비밀번호 생성
+                random_pw = secrets.token_urlsafe(12)
+                hashed = hash_password(random_pw)
                 cur.execute(
                     "INSERT INTO users (username, password, role, display_name) VALUES (%s, %s, 'admin', '관리자')",
                     ("admin", hashed)
                 )
-                print("[Init] admin 계정 생성 (초기 비밀번호: admin)")
+                print("=" * 60)
+                print(f"[Init] admin 계정 생성")
+                print(f"[Init] ★ 초기 비밀번호: {random_pw}")
+                print(f"[Init] ★ 로그인 후 반드시 비밀번호를 변경하세요!")
+                print("=" * 60)
             elif admin and not admin["password"].startswith("$2b$"):
                 hashed = hash_password("admin")
                 cur.execute("UPDATE users SET password = %s WHERE id = %s", (hashed, admin["id"]))
@@ -149,12 +321,49 @@ def startup_init():
 
     print("[Init] 데이터베이스 초기화 완료")
 
+    # 백그라운드 태스크: 오래된 에이전트 오프라인 처리
+    asyncio.create_task(_cleanup_stale_agents())
+
 
 # ===========================================================
 # Auth
 # ===========================================================
+async def _cleanup_stale_agents():
+    """하트비트 미수신 에이전트 자동 오프라인 처리 (3분 이상 미응답)"""
+    STALE_MINUTES = 3
+    while True:
+        await asyncio.sleep(120)   # 2분마다 실행
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE agents SET is_online = FALSE
+                        WHERE is_online = TRUE
+                          AND last_seen < %s
+                    """, (datetime.now(timezone.utc) - timedelta(minutes=STALE_MINUTES),))
+                    if cur.rowcount:
+                        print(f"[Cleanup] 오프라인 처리: {cur.rowcount}개 에이전트 (마지막 하트비트 {STALE_MINUTES}분 초과)")
+        except Exception as e:
+            print(f"[Cleanup] 오류: {e}")
+
+
+def _check_rate_limit(ip: str):
+    """로그인 속도 제한 확인 (IP당 {RATE_LIMIT_MAX}회/{RATE_LIMIT_WINDOW}초)"""
+    now = time.time()
+    attempts = _login_attempts[ip]
+    # 오래된 시도 제거
+    _login_attempts[ip] = [t for t in attempts if now - t < RATE_LIMIT_WINDOW]
+    if len(_login_attempts[ip]) >= RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail=f"로그인 시도 횟수 초과 ({RATE_LIMIT_MAX}회/{RATE_LIMIT_WINDOW}초). 잠시 후 다시 시도하세요.",
+        )
+    _login_attempts[ip].append(now)
+
+
 @app.post("/api/auth/login", response_model=LoginResponse)
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
+    _check_rate_limit(request.client.host if request.client else "unknown")
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -223,12 +432,18 @@ def register_agent(req: AgentRegister, user: dict = Depends(get_current_user)):
                         hostname = %s, os_info = %s, ip = %s,
                         ip_public = %s, ws_port = %s,
                         mac_address = %s, screen_width = %s, screen_height = %s,
+                        agent_version = %s,
+                        cpu_model = %s, cpu_cores = %s, ram_gb = %s,
+                        motherboard = %s, gpu_model = %s,
                         is_online = TRUE, last_seen = %s
                     WHERE id = %s
                 """, (
                     req.hostname, req.os_info, req.ip,
                     req.ip_public, req.ws_port,
                     req.mac_address, req.screen_width, req.screen_height,
+                    req.agent_version,
+                    req.cpu_model, req.cpu_cores, req.ram_gb,
+                    req.motherboard, req.gpu_model,
                     now, existing["id"],
                 ))
                 agent_id_db = existing["id"]
@@ -239,13 +454,18 @@ def register_agent(req: AgentRegister, user: dict = Depends(get_current_user)):
                         (agent_id, owner_id, hostname, os_info, ip,
                          ip_public, ws_port,
                          mac_address, screen_width, screen_height,
+                         agent_version,
+                         cpu_model, cpu_cores, ram_gb, motherboard, gpu_model,
                          is_online, last_seen)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
                 """, (
                     req.agent_id, user["id"],
                     req.hostname, req.os_info, req.ip,
                     req.ip_public, req.ws_port,
                     req.mac_address, req.screen_width, req.screen_height,
+                    req.agent_version,
+                    req.cpu_model, req.cpu_cores, req.ram_gb,
+                    req.motherboard, req.gpu_model,
                     now,
                 ))
                 agent_id_db = cur.lastrowid
@@ -270,12 +490,14 @@ def agent_heartbeat(req: AgentHeartbeat, user: dict = Depends(get_current_user))
                 UPDATE agents SET
                     is_online = TRUE, last_seen = %s, ip = %s,
                     ip_public = %s, ws_port = %s,
-                    screen_width = %s, screen_height = %s
+                    screen_width = %s, screen_height = %s,
+                    agent_version = %s
                 WHERE agent_id = %s AND owner_id = %s
             """, (
                 datetime.now(timezone.utc), req.ip,
                 req.ip_public, req.ws_port,
                 req.screen_width, req.screen_height,
+                req.agent_version,
                 req.agent_id, user["id"],
             ))
     return {"status": "ok"}
@@ -291,77 +513,6 @@ def agent_offline(req: AgentHeartbeat, user: dict = Depends(get_current_user)):
                 (req.agent_id, user["id"]),
             )
     return {"status": "ok"}
-
-
-# ===========================================================
-# Manager 등록/조회 (매니저 IP를 에이전트가 알아가는 용도)
-# ===========================================================
-@app.post("/api/manager/register", response_model=ManagerResponse)
-def register_manager(req: ManagerRegister, user: dict = Depends(get_current_user)):
-    """매니저(관리PC)가 자신의 IP를 등록. 에이전트가 이 IP로 WS 연결."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            now = datetime.now(timezone.utc)
-            cur.execute(
-                "SELECT id FROM managers WHERE owner_id = %s",
-                (user["id"],),
-            )
-            existing = cur.fetchone()
-
-            if existing:
-                cur.execute("""
-                    UPDATE managers SET ip = %s, ws_port = %s,
-                        is_online = TRUE, last_seen = %s
-                    WHERE id = %s
-                """, (req.ip, req.ws_port, now, existing["id"]))
-                mgr_id = existing["id"]
-            else:
-                cur.execute("""
-                    INSERT INTO managers (owner_id, ip, ws_port, is_online, last_seen)
-                    VALUES (%s, %s, %s, TRUE, %s)
-                """, (user["id"], req.ip, req.ws_port, now))
-                mgr_id = cur.lastrowid
-
-            cur.execute("SELECT * FROM managers WHERE id = %s", (mgr_id,))
-            mgr = cur.fetchone()
-
-    return _manager_to_response(mgr)
-
-
-@app.post("/api/manager/heartbeat")
-def manager_heartbeat(req: ManagerHeartbeat, user: dict = Depends(get_current_user)):
-    """매니저 하트비트 (주기적 상태 보고)"""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            now = datetime.now(timezone.utc)
-            updates = ["is_online = TRUE", "last_seen = %s"]
-            params = [now]
-            if req.ip:
-                updates.append("ip = %s")
-                params.append(req.ip)
-            params.append(user["id"])
-            cur.execute(
-                f"UPDATE managers SET {', '.join(updates)} WHERE owner_id = %s",
-                params,
-            )
-    return {"status": "ok"}
-
-
-@app.get("/api/manager", response_model=ManagerResponse)
-def get_manager(user: dict = Depends(get_current_user)):
-    """같은 계정의 매니저 IP 조회 (에이전트가 매니저에 WS 연결하기 위해 사용)"""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM managers WHERE owner_id = %s AND is_online = TRUE",
-                (user["id"],),
-            )
-            mgr = cur.fetchone()
-
-    if not mgr:
-        raise HTTPException(status_code=404, detail="온라인 매니저를 찾을 수 없습니다")
-
-    return _manager_to_response(mgr)
 
 
 # ===========================================================
@@ -547,17 +698,12 @@ def _agent_to_response(agent: dict) -> AgentResponse:
         owner_id=agent["owner_id"],
         owner_username=agent.get("owner_username", ""),
         last_seen=str(agent["last_seen"]) if agent.get("last_seen") else None,
-    )
-
-
-def _manager_to_response(mgr: dict) -> ManagerResponse:
-    return ManagerResponse(
-        id=mgr["id"],
-        owner_id=mgr["owner_id"],
-        ip=mgr["ip"],
-        ws_port=mgr.get("ws_port", 4797),
-        is_online=bool(mgr.get("is_online", False)),
-        last_seen=str(mgr["last_seen"]) if mgr.get("last_seen") else None,
+        agent_version=agent.get("agent_version", ""),
+        cpu_model=agent.get("cpu_model", ""),
+        cpu_cores=agent.get("cpu_cores", 0),
+        ram_gb=agent.get("ram_gb", 0.0),
+        motherboard=agent.get("motherboard", ""),
+        gpu_model=agent.get("gpu_model", ""),
     )
 
 
@@ -574,293 +720,9 @@ def _user_to_response(user: dict) -> UserResponse:
 
 
 # ===========================================================
-# WebSocket 릴레이 (매니저 ↔ 서버 ↔ 에이전트)
-# ===========================================================
-
-# 인메모리 릴레이 상태
-_ws_managers: Dict[int, WebSocket] = {}                   # owner_id → 매니저 WS
-_ws_agents: Dict[int, Dict[str, WebSocket]] = {}          # owner_id → {agent_id: WS}
-_agent_owner_map: Dict[str, int] = {}                     # "owner_id:agent_id" → owner_id (역매핑)
-
-# agent_id를 32바이트로 패딩/언패딩
-AGENT_ID_LEN = 32
-
-
-def _pad_agent_id(agent_id: str) -> bytes:
-    """agent_id를 32바이트로 패딩"""
-    return agent_id.encode('utf-8')[:AGENT_ID_LEN].ljust(AGENT_ID_LEN, b'\x00')
-
-
-def _unpad_agent_id(data: bytes) -> str:
-    """32바이트에서 agent_id 추출"""
-    return data[:AGENT_ID_LEN].rstrip(b'\x00').decode('utf-8', errors='replace')
-
-
-def _verify_ws_token(token: str) -> dict:
-    """WebSocket용 JWT 토큰 검증 (query param)"""
-    try:
-        payload = decode_token(token)
-        owner_id = payload.get("sub")
-        username = payload.get("username", "")
-        if not owner_id:
-            return {}
-        return {"id": owner_id, "username": username, "role": payload.get("role", "user")}
-    except Exception:
-        return {}
-
-
-@app.websocket("/ws/manager")
-async def ws_manager_endpoint(ws: WebSocket, token: str = Query(...)):
-    """매니저 WS 접속 — JWT 인증 후 메시지 릴레이
-
-    매니저가 보내는 메시지:
-      - JSON: {"type": "...", "target_agent": "DESKTOP-ABC", ...}
-        → target_agent 추출 → 해당 에이전트에 target_agent 제거 후 전달
-      - Binary: agent_id(32바이트) + 원본 데이터
-        → agent_id 추출 → 해당 에이전트에 원본 데이터 전달
-    """
-    user = _verify_ws_token(token)
-    if not user:
-        await ws.close(code=4001, reason="Invalid token")
-        return
-
-    owner_id = user["id"]
-    await ws.accept()
-
-    # 기존 매니저 연결이 있으면 교체
-    old_ws = _ws_managers.get(owner_id)
-    if old_ws:
-        try:
-            await old_ws.close(code=4002, reason="Replaced by new connection")
-        except Exception:
-            pass
-        # 이전 연결 핸들러 정리 대기
-        await asyncio.sleep(0.1)
-
-    _ws_managers[owner_id] = ws
-    logger.info(f"[WS Relay] 매니저 접속: owner_id={owner_id} ({user['username']})")
-
-    # 이미 접속 중인 에이전트들의 auth 메시지를 매니저에 전달
-    if owner_id in _ws_agents:
-        for agent_id, agent_ws in _ws_agents[owner_id].items():
-            try:
-                await ws.send_text(json.dumps({
-                    "type": "agent_connected",
-                    "source_agent": agent_id,
-                }))
-            except Exception:
-                pass
-
-    try:
-        while True:
-            message = await ws.receive()
-            msg_type = message.get("type")
-
-            if msg_type == "websocket.receive":
-                if "text" in message:
-                    # JSON 메시지 — target_agent로 라우팅
-                    raw = message["text"]
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    target_agent = data.pop("target_agent", None)
-                    msg_cmd = data.get("type", "?")
-                    if not target_agent:
-                        logger.debug(f"[Relay M→A] target_agent 없음: type={msg_cmd}")
-                        continue
-
-                    # 해당 에이전트에 전달
-                    agent_ws = _ws_agents.get(owner_id, {}).get(target_agent)
-                    if agent_ws:
-                        try:
-                            await agent_ws.send_text(json.dumps(data))
-                            if msg_cmd not in ('request_thumbnail', 'start_thumbnail_push', 'ping'):
-                                logger.info(f"[Relay M→A] type={msg_cmd} → {target_agent}")
-                        except Exception as e:
-                            logger.warning(f"[Relay M→A] 전달 실패: {e}")
-                    else:
-                        logger.warning(f"[Relay M→A] 에이전트 없음: {target_agent} (등록: {list(_ws_agents.get(owner_id, {}).keys())})")
-
-                elif "bytes" in message:
-                    # 바이너리 메시지 — 앞 32바이트 = agent_id
-                    raw_bytes = message["bytes"]
-                    if len(raw_bytes) <= AGENT_ID_LEN:
-                        continue
-
-                    target_agent = _unpad_agent_id(raw_bytes[:AGENT_ID_LEN])
-                    payload = raw_bytes[AGENT_ID_LEN:]
-
-                    agent_ws = _ws_agents.get(owner_id, {}).get(target_agent)
-                    if agent_ws:
-                        try:
-                            await agent_ws.send_bytes(payload)
-                            logger.info(f"[Relay M→A] binary ({len(payload)}B) → {target_agent}")
-                        except Exception as e:
-                            logger.warning(f"[Relay M→A] 바이너리 전달 실패: {e}")
-                    else:
-                        logger.warning(f"[Relay M→A] 바이너리 에이전트 없음: {target_agent}")
-
-            elif msg_type == "websocket.disconnect":
-                break
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.warning(f"[WS Relay] 매니저 오류 (owner_id={owner_id}): {e}")
-    finally:
-        if _ws_managers.get(owner_id) is ws:
-            del _ws_managers[owner_id]
-        logger.info(f"[WS Relay] 매니저 해제: owner_id={owner_id}")
-
-
-@app.websocket("/ws/agent")
-async def ws_agent_endpoint(ws: WebSocket, token: str = Query(...)):
-    """에이전트 WS 접속 — JWT 인증 후 메시지 릴레이
-
-    에이전트가 보내는 메시지:
-      - 첫 메시지: {"type": "auth", "agent_id": "...", ...}
-        → agent_id 추출/저장, 매니저에 그대로 전달
-      - JSON: {"type": "clipboard", ...}
-        → source_agent 추가 후 매니저에 전달
-      - Binary: 0x01/0x02 + JPEG
-        → agent_id(32바이트) 프리픽스 붙여서 매니저에 전달
-    """
-    user = _verify_ws_token(token)
-    if not user:
-        await ws.close(code=4001, reason="Invalid token")
-        return
-
-    owner_id = user["id"]
-    await ws.accept()
-
-    agent_id = None
-
-    try:
-        # 첫 메시지: auth 핸드셰이크
-        raw = await asyncio.wait_for(ws.receive_text(), timeout=10)
-        auth_msg = json.loads(raw)
-
-        if auth_msg.get("type") != "auth":
-            await ws.close(code=4003, reason="Expected auth message")
-            return
-
-        agent_id = auth_msg.get("agent_id", "")
-        if not agent_id:
-            await ws.close(code=4003, reason="Missing agent_id")
-            return
-
-        # 에이전트 등록
-        if owner_id not in _ws_agents:
-            _ws_agents[owner_id] = {}
-
-        # 기존 같은 agent_id 연결이 있으면 교체
-        old_ws = _ws_agents[owner_id].get(agent_id)
-        if old_ws:
-            try:
-                await old_ws.close(code=4002, reason="Replaced")
-            except Exception:
-                pass
-
-        _ws_agents[owner_id][agent_id] = ws
-        logger.info(f"[WS Relay] 에이전트 접속: {agent_id} (owner_id={owner_id})")
-
-        # 에이전트에 auth_ok 응답
-        await ws.send_text(json.dumps({"type": "auth_ok"}))
-        logger.info(f"[WS Relay] auth_ok 전송 완료: {agent_id}")
-
-        # 매니저에 auth 메시지 전달 (agent_connected 트리거)
-        mgr_ws = _ws_managers.get(owner_id)
-        if mgr_ws:
-            auth_msg["source_agent"] = agent_id
-            try:
-                await mgr_ws.send_text(json.dumps(auth_msg))
-            except Exception:
-                pass
-
-        # 메시지 릴레이 루프
-        agent_msg_count = 0
-        while True:
-            message = await ws.receive()
-            msg_type = message.get("type")
-
-            if msg_type == "websocket.receive":
-                agent_msg_count += 1
-                mgr_ws = _ws_managers.get(owner_id)
-
-                if "text" in message:
-                    raw_text = message["text"]
-                    try:
-                        data = json.loads(raw_text)
-                    except json.JSONDecodeError:
-                        continue
-
-                    msg_cmd = data.get("type", "?")
-
-                    if not mgr_ws:
-                        if agent_msg_count <= 3:
-                            logger.warning(f"[Agent {agent_id}] 매니저 미접속 — 메시지 버림: type={msg_cmd}")
-                        continue
-
-                    data["source_agent"] = agent_id
-                    try:
-                        await mgr_ws.send_text(json.dumps(data))
-                        if msg_cmd not in ('pong', 'thumbnail_error'):
-                            logger.debug(f"[Relay A→M] type={msg_cmd} ← {agent_id}")
-                    except Exception as e:
-                        logger.warning(f"[Relay A→M] 전달 실패: {e}")
-
-                elif "bytes" in message:
-                    raw_bytes = message["bytes"]
-                    if not raw_bytes:
-                        continue
-
-                    if not mgr_ws:
-                        continue
-
-                    prefixed = _pad_agent_id(agent_id) + raw_bytes
-                    try:
-                        await mgr_ws.send_bytes(prefixed)
-                    except Exception as e:
-                        logger.warning(f"[Relay A→M] 바이너리 전달 실패: {e}")
-
-            elif msg_type == "websocket.disconnect":
-                logger.info(f"[Agent {agent_id}] WS 종료 (총 {agent_msg_count}개 메시지 수신)")
-                break
-
-    except asyncio.TimeoutError:
-        logger.warning(f"[WS Relay] 에이전트 auth 타임아웃")
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.warning(f"[WS Relay] 에이전트 오류 ({agent_id or 'unknown'}): {e}")
-    finally:
-        if agent_id and owner_id in _ws_agents:
-            if _ws_agents[owner_id].get(agent_id) is ws:
-                del _ws_agents[owner_id][agent_id]
-                if not _ws_agents[owner_id]:
-                    del _ws_agents[owner_id]
-
-            # 매니저에 disconnect 알림
-            mgr_ws = _ws_managers.get(owner_id)
-            if mgr_ws:
-                try:
-                    await mgr_ws.send_text(json.dumps({
-                        "type": "agent_disconnected",
-                        "source_agent": agent_id,
-                    }))
-                except Exception:
-                    pass
-
-        logger.info(f"[WS Relay] 에이전트 해제: {agent_id or 'unknown'} (owner_id={owner_id})")
-
-
-# ===========================================================
 # 실행
 # ===========================================================
 if __name__ == "__main__":
     import uvicorn
     from config import API_HOST, API_PORT
-
     uvicorn.run(app, host=API_HOST, port=API_PORT)

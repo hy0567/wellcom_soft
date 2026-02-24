@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QTreeWidget, QTreeWidgetItem,
     QWidget, QVBoxLayout, QHBoxLayout,
     QToolBar, QLabel, QMenu, QMessageBox,
-    QInputDialog, QApplication,
+    QInputDialog, QApplication, QSpinBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QAction, QColor, QBrush, QFont, QShortcut, QKeySequence
@@ -91,13 +91,6 @@ class MainWindow(QMainWindow):
         # 상태 바
         self.status_label = QLabel("준비")
         self.statusBar().addWidget(self.status_label, 1)
-
-        # v2.0.9 — WS 연결 상태 인디케이터
-        self._ws_status_label = QLabel("● WS 연결 중")
-        self._ws_status_label.setStyleSheet(
-            "color: #FFA726; padding: 0 6px; font-size: 11px; font-weight: bold;"
-        )
-        self.statusBar().addPermanentWidget(self._ws_status_label)
 
         self.multi_label = QLabel("")
         self.statusBar().addPermanentWidget(self.multi_label)
@@ -237,6 +230,16 @@ class MainWindow(QMainWindow):
         self.action_settings.triggered.connect(self._open_settings)
         toolbar.addAction(self.action_settings)
 
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("  컬럼: "))
+        self._col_spin = QSpinBox()
+        self._col_spin.setRange(3, 20)
+        self._col_spin.setValue(settings.get('grid_view.columns', 5))
+        self._col_spin.setFixedWidth(55)
+        self._col_spin.setToolTip("한 줄에 표시할 PC 수 (3~20)")
+        self._col_spin.valueChanged.connect(self._on_columns_changed)
+        toolbar.addWidget(self._col_spin)
+
     def _create_tree(self):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["PC 목록"])
@@ -254,6 +257,16 @@ class MainWindow(QMainWindow):
         signals.device_status_changed.connect(self._on_status_changed)
         signals.devices_reloaded.connect(self._refresh_tree)
         self.multi_control.mode_changed.connect(self._on_multi_mode_changed)
+        # 연결 모드 변경 시 상태 바 즉시 갱신
+        self.agent_server.connection_mode_changed.connect(
+            lambda agent_id, mode: self._update_status_bar()
+        )
+        self.agent_server.agent_connected.connect(
+            lambda agent_id, ip: self._update_status_bar()
+        )
+        self.agent_server.agent_disconnected.connect(
+            lambda agent_id: self._update_status_bar()
+        )
 
     def _load_settings(self):
         w = settings.get('window.width', WINDOW_MIN_WIDTH)
@@ -353,6 +366,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         open_action = menu.addAction("원격 제어")
         open_action.triggered.connect(lambda: self._open_viewer(pc_name))
+        info_action = menu.addAction("PC 정보")
+        info_action.triggered.connect(lambda: self._show_pc_info(pc_name))
         menu.addSeparator()
         rename_action = menu.addAction("이름 변경")
         rename_action.triggered.connect(lambda: self._rename_pc(pc_name))
@@ -364,6 +379,18 @@ class MainWindow(QMainWindow):
         remove_action = menu.addAction("제거")
         remove_action.triggered.connect(lambda: self._remove_pc(pc_name))
         menu.exec(pos)
+
+    def _on_columns_changed(self, value: int):
+        """툴바 컬럼 스피너 변경 → 그리드 즉시 재구성"""
+        settings.set('grid_view.columns', value)
+        self.grid_view.rebuild_grid()
+
+    def _show_pc_info(self, pc_name: str):
+        """PC 정보 팝업 표시"""
+        from ui.pc_info_dialog import PCInfoDialog
+        pc = self.pc_manager.get_pc(pc_name)
+        if pc:
+            PCInfoDialog(pc, self.agent_server, self).exec()
 
     # ==================== 뷰어 관리 (별도 창) ====================
 
@@ -379,7 +406,19 @@ class MainWindow(QMainWindow):
             return
 
         if not pc.is_online:
-            QMessageBox.warning(self, "오프라인", f"{pc_name}이(가) 오프라인 상태입니다.")
+            last_seen = pc.last_seen_str or "알 수 없음"
+            mode = self.agent_server.get_connection_mode(pc.agent_id)
+            reason = {
+                "lan": "LAN 직접 연결이 끊겼습니다",
+                "wan": "WAN 직접 연결이 끊겼습니다",
+                "relay": "서버 릴레이 연결이 끊겼습니다",
+            }.get(mode, "에이전트가 응답하지 않습니다")
+            QMessageBox.warning(
+                self, "오프라인",
+                f"'{pc_name}'이(가) 오프라인 상태입니다.\n\n"
+                f"상태: {reason}\n"
+                f"마지막 접속: {last_seen}"
+            )
             return
 
         pc_list = [p.name for p in self.pc_manager.get_all_pcs() if p.is_online]
@@ -596,27 +635,30 @@ class MainWindow(QMainWindow):
 
     def _update_status_bar(self):
         from api_client import api_client
+        from core.agent_server import ConnectionMode
         stats = self.pc_manager.get_statistics()
         self.agent_count_label.setText(f"에이전트: {stats['online']}/{stats['total']}")
         username = api_client.username or '미로그인'
 
-        # v2.0.9 — WS 연결 상태
-        ws_connected = self.agent_server._ws is not None
-        connected_count = self.agent_server.connected_count
-        if ws_connected:
-            self._ws_status_label.setText(f"● WS 연결됨 ({connected_count}대)")
-            self._ws_status_label.setStyleSheet(
-                "color: #4CAF50; padding: 0 6px; font-size: 11px; font-weight: bold;"
-            )
-        else:
-            self._ws_status_label.setText("● WS 연결 끊김")
-            self._ws_status_label.setStyleSheet(
-                "color: #F44336; padding: 0 6px; font-size: 11px; font-weight: bold;"
-            )
+        # 연결 모드별 카운트
+        connections = self.agent_server._connections
+        lan_count = sum(1 for c in connections.values() if c.mode == ConnectionMode.LAN)
+        wan_count = sum(1 for c in connections.values() if c.mode == ConnectionMode.WAN)
+        relay_count = sum(1 for c in connections.values() if c.mode == ConnectionMode.RELAY)
+        total_conn = lan_count + wan_count + relay_count
+
+        mode_parts = []
+        if lan_count:
+            mode_parts.append(f"LAN:{lan_count}")
+        if wan_count:
+            mode_parts.append(f"WAN:{wan_count}")
+        if relay_count:
+            mode_parts.append(f"릴레이:{relay_count}")
+        mode_str = f"({', '.join(mode_parts)})" if mode_parts else ""
 
         self.status_label.setText(
             f"사용자: {username} | "
-            f"WS릴레이: {connected_count}대"
+            f"연결: {total_conn}대 {mode_str}"
         )
 
     # ==================== 업데이트 / 정보 ====================

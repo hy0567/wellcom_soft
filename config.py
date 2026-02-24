@@ -87,12 +87,10 @@ class Settings:
         },
         'screen': {
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
-            'stream_fps': 30,             # 1:1 제어 FPS (v2.0.7: 15→30)
-            'stream_quality': 70,         # 스트리밍 JPEG 품질 (v2.0.7: 60→70)
-            'stream_codec': 'h264',       # 스트리밍 코덱: 'h264' 또는 'mjpeg' (v2.0.2)
-            'keyframe_interval': 60,      # H.264 키프레임 간격 (프레임 수, v2.0.2)
-            'thumbnail_quality': 40,      # 썸네일 JPEG 품질 (그리드 미리보기용)
-            'thumbnail_width': 320,       # 썸네일 최대 너비 (그리드 미리보기용)
+            'stream_fps': 15,             # 전체 화면 스트리밍 FPS
+            'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
+            'thumbnail_quality': 40,      # 썸네일 JPEG 품질
+            'thumbnail_width': 320,       # 썸네일 최대 너비
         },
         'grid_view': {
             'columns': 5,                 # 기본 5컬럼 (LinkIO 기준)
@@ -138,10 +136,10 @@ class Settings:
             'auto_login': False
         },
         'p2p': {
-            'agent_ws_port': 21350,        # 에이전트 WS 서버 기본 포트
-            'connect_timeout_lan': 3,      # LAN(ip2) 연결 타임아웃 (초)
-            'connect_timeout_wan': 5,      # WAN(ip1) 연결 타임아웃 (초)
-            'reconnect_interval': 10,      # 재연결 간격 (초)
+            'agent_ws_port': 21350,         # 에이전트 WS 서버 기본 포트
+            'connect_timeout_lan': 3,       # LAN 연결 타임아웃 (초)
+            'connect_timeout_wan': 5,       # WAN 연결 타임아웃 (초)
+            'reconnect_interval': 10,       # 재연결 간격 (초)
         },
     }
 

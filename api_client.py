@@ -1,7 +1,7 @@
 """WellcomSOFT API 클라이언트
 
 매니저/에이전트 공통으로 사용하는 서버 통신 클라이언트.
-로그인 → 에이전트 등록/조회 → JWT 토큰 제공 (WS 릴레이 접속용)
+로그인 → 에이전트 등록/조회 → 하트비트
 """
 import logging
 import requests
@@ -16,7 +16,7 @@ class APIClient:
     """서버 API 클라이언트"""
 
     def __init__(self):
-        self._base_url = settings.get('server.api_url', 'http://log.wellcomll.org:4797')
+        self._base_url = settings.get('server.api_url', 'http://log.wellcomll.org:8000')
         self._token: str = settings.get('server.token', '')
         self._user: Optional[dict] = None
 
@@ -104,11 +104,20 @@ class APIClient:
 
     # ==================== Agent 등록 (에이전트 측) ====================
 
+    @property
+    def token(self) -> str:
+        """JWT 토큰 (P2P 연결 시 에이전트 인증용)"""
+        return self._token
+
     def register_agent(self, agent_id: str, hostname: str,
                        os_info: str = '', ip: str = '',
                        ip_public: str = '', ws_port: int = 21350,
                        mac_address: str = '',
-                       screen_width: int = 1920, screen_height: int = 1080) -> dict:
+                       screen_width: int = 1920, screen_height: int = 1080,
+                       agent_version: str = '',
+                       cpu_model: str = '', cpu_cores: int = 0,
+                       ram_gb: float = 0.0, motherboard: str = '',
+                       gpu_model: str = '') -> dict:
         """에이전트 등록 (로그인한 사용자 소유로)"""
         return self._post('/api/agents/register', {
             'agent_id': agent_id,
@@ -120,11 +129,18 @@ class APIClient:
             'mac_address': mac_address,
             'screen_width': screen_width,
             'screen_height': screen_height,
+            'agent_version': agent_version,
+            'cpu_model': cpu_model,
+            'cpu_cores': cpu_cores,
+            'ram_gb': ram_gb,
+            'motherboard': motherboard,
+            'gpu_model': gpu_model,
         })
 
     def send_heartbeat(self, agent_id: str, ip: str = '',
                        ip_public: str = '', ws_port: int = 21350,
-                       screen_width: int = 1920, screen_height: int = 1080):
+                       screen_width: int = 1920, screen_height: int = 1080,
+                       agent_version: str = ''):
         """에이전트 하트비트"""
         try:
             self._post('/api/agents/heartbeat', {
@@ -134,6 +150,7 @@ class APIClient:
                 'ws_port': ws_port,
                 'screen_width': screen_width,
                 'screen_height': screen_height,
+                'agent_version': agent_version,
             })
         except Exception as e:
             logger.debug(f"하트비트 실패: {e}")
@@ -184,13 +201,6 @@ class APIClient:
             return True
         except Exception:
             return False
-
-    # ==================== Token 접근자 ====================
-
-    @property
-    def token(self) -> str:
-        """JWT 토큰 반환 (WS 릴레이 접속용)"""
-        return self._token
 
 
 # 싱글톤 인스턴스

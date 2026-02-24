@@ -321,6 +321,10 @@ class AgentServer(QObject):
         for agent_id in agent_ids:
             self.execute_command(agent_id, command)
 
+    def send_update_request(self, agent_id: str):
+        """에이전트에 원격 업데이트 요청 전송"""
+        self._send_to_agent(agent_id, {'type': 'update_request'})
+
     # ==================== 내부 구현 — 전송 ====================
 
     def _send_to_agent(self, agent_id: str, msg_dict: dict):
@@ -335,9 +339,13 @@ class AgentServer(QObject):
 
         msg = json.dumps(msg_dict)
         try:
-            asyncio.run_coroutine_threadsafe(conn.ws.send(msg), self._loop)
-        except Exception:
-            pass
+            future = asyncio.run_coroutine_threadsafe(conn.ws.send(msg), self._loop)
+            future.add_done_callback(
+                lambda f: logger.warning(f"[P2P] {agent_id} 전송 실패: {f.exception()}")
+                if not f.cancelled() and f.exception() else None
+            )
+        except Exception as e:
+            logger.warning(f"[P2P] {agent_id} 전송 예약 실패: {e}")
 
     def _send_binary_to_agent(self, agent_id: str, data: bytes):
         """에이전트에 바이너리 전송"""

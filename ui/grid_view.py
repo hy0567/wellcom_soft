@@ -9,7 +9,7 @@ from typing import Dict
 
 from PyQt6.QtWidgets import (
     QScrollArea, QWidget, QGridLayout, QLabel, QVBoxLayout,
-    QFrame, QSizePolicy, QHBoxLayout,
+    QFrame, QSizePolicy, QHBoxLayout, QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer, QByteArray, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QColor, QPalette, QMouseEvent, QFont, QPainter
@@ -19,15 +19,21 @@ from core.pc_manager import PCManager
 from core.agent_server import AgentServer
 from core.pc_device import PCStatus
 
+try:
+    from version import __version__ as MANAGER_VERSION
+except ImportError:
+    MANAGER_VERSION = ''
+
 logger = logging.getLogger(__name__)
 
 
 class PCThumbnailWidget(QFrame):
     """단일 PC 썸네일 위젯 (LinkIO 스타일)"""
 
-    double_clicked = pyqtSignal(str)  # pc_name
-    right_clicked = pyqtSignal(str, object)  # pc_name, QPoint (global pos)
-    selected = pyqtSignal(str, bool)  # pc_name, is_selected
+    double_clicked = pyqtSignal(str)   # pc_name
+    right_clicked = pyqtSignal(str, object)   # pc_name, QPoint (global pos)
+    selected = pyqtSignal(str, bool)   # pc_name, is_selected
+    update_requested = pyqtSignal(str)  # pc_name
 
     def __init__(self, pc_name: str, memo: str = '', parent=None):
         super().__init__(parent)
@@ -64,6 +70,32 @@ class PCThumbnailWidget(QFrame):
         self.name_label.setFont(QFont("", 10, QFont.Weight.Bold))
         bottom_layout.addWidget(self.name_label)
 
+        self.version_label = QLabel()
+        self.version_label.setFont(QFont("", 8))
+        self.version_label.setStyleSheet("color: #888;")
+        bottom_layout.addWidget(self.version_label)
+
+        # 연결 모드 배지 (LAN / WAN / 릴레이)
+        self.mode_label = QLabel()
+        self.mode_label.setFont(QFont("", 8, QFont.Weight.Bold))
+        self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_label.setFixedHeight(16)
+        self.mode_label.setContentsMargins(4, 0, 4, 0)
+        self.mode_label.setVisible(False)
+        bottom_layout.addWidget(self.mode_label)
+
+        self.update_btn = QPushButton("업데이트")
+        self.update_btn.setFixedHeight(18)
+        self.update_btn.setFont(QFont("", 8))
+        self.update_btn.setStyleSheet(
+            "QPushButton { background-color: #e67e22; color: white; border: none;"
+            " border-radius: 3px; padding: 0 6px; }"
+            "QPushButton:hover { background-color: #d35400; }"
+        )
+        self.update_btn.setVisible(False)
+        self.update_btn.clicked.connect(lambda: self.update_requested.emit(self.pc_name))
+        bottom_layout.addWidget(self.update_btn)
+
         self.memo_label = QLabel(memo)
         self.memo_label.setFont(QFont("", 8))
         self.memo_label.setStyleSheet("color: #888;")
@@ -85,7 +117,7 @@ class PCThumbnailWidget(QFrame):
             )
             self.image_label.setPixmap(scaled)
 
-    def set_status(self, status: PCStatus, last_seen: str = ''):
+    def set_status(self, status: PCStatus):
         self._status = status
         self._is_online = (status == PCStatus.ONLINE)
         self._update_style()
@@ -93,14 +125,8 @@ class PCThumbnailWidget(QFrame):
             self.image_label.clear()
             if status == PCStatus.ERROR:
                 self.image_label.setText("오류")
-            elif status == PCStatus.CONNECTING:
-                self.image_label.setText("연결 중...")
             else:
-                # 오프라인 — last_seen 시간 표시
-                if last_seen:
-                    self.image_label.setText(f"오프라인\n{last_seen}")
-                else:
-                    self.image_label.setText("오프라인")
+                self.image_label.setText("오프라인")
 
     def set_selected(self, selected: bool):
         self._is_selected = selected
@@ -109,6 +135,48 @@ class PCThumbnailWidget(QFrame):
     def set_memo(self, memo: str):
         self.memo_label.setText(memo)
 
+    def update_version(self, agent_version: str, manager_version: str = ''):
+        """버전 배지 갱신 — 구버전이면 빨간 배지 + 업데이트 버튼, 최신이면 초록 배지"""
+        if not agent_version:
+            self.version_label.setText('')
+            self.version_label.setStyleSheet("color: #555;")
+            self.update_btn.setVisible(False)
+            return
+
+        self.version_label.setText(f'v{agent_version}')
+        needs_update = False
+        if manager_version:
+            try:
+                av = tuple(int(x) for x in agent_version.split('.'))
+                mv = tuple(int(x) for x in manager_version.split('.'))
+                needs_update = av < mv
+            except Exception:
+                pass
+
+        if needs_update:
+            self.version_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        else:
+            self.version_label.setStyleSheet("color: #2ecc71;")
+        self.update_btn.setVisible(needs_update)
+
+    def update_mode(self, mode: str):
+        """연결 모드 배지 갱신 (lan / wan / relay / '')"""
+        MODE_STYLES = {
+            'lan':   ('LAN',  '#27ae60', '#fff'),   # 초록
+            'wan':   ('WAN',  '#2980b9', '#fff'),   # 파랑
+            'relay': ('릴레이', '#d35400', '#fff'),  # 주황
+        }
+        if mode in MODE_STYLES:
+            text, bg, fg = MODE_STYLES[mode]
+            self.mode_label.setText(text)
+            self.mode_label.setStyleSheet(
+                f"QLabel {{ background-color: {bg}; color: {fg};"
+                f" border-radius: 3px; padding: 0 4px; }}"
+            )
+            self.mode_label.setVisible(True)
+        else:
+            self.mode_label.setVisible(False)
+
     def _update_style(self):
         """연결 상태 + 선택 상태에 따라 테두리 색상 변경"""
         if self._is_selected:
@@ -116,9 +184,6 @@ class PCThumbnailWidget(QFrame):
             border_width = 3
         elif self._status == PCStatus.ONLINE:
             border_color = '#4CAF50'
-            border_width = 2
-        elif self._status == PCStatus.CONNECTING:
-            border_color = '#FFA726'
             border_width = 2
         elif self._status == PCStatus.ERROR:
             border_color = '#f44336'
@@ -198,6 +263,7 @@ class GridView(QScrollArea):
         agent_server.thumbnail_received.connect(self._on_thumbnail_received)
         agent_server.agent_connected.connect(self._on_agent_connected)
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
+        agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
 
         # 썸네일 갱신 타이머
         frame_speed = settings.get('grid_view.frame_speed', 5)
@@ -222,10 +288,17 @@ class GridView(QScrollArea):
 
             memo = getattr(pc.info, 'memo', '')
             thumb = PCThumbnailWidget(pc.name, memo)
-            thumb.set_status(pc.status, getattr(pc, 'last_seen_str', ''))
+            thumb.set_status(pc.status)
             thumb.double_clicked.connect(self.open_viewer.emit)
             thumb.right_clicked.connect(self.context_menu_requested.emit)
             thumb.selected.connect(self._on_pc_selected)
+            thumb.update_requested.connect(self._on_update_requested)
+
+            agent_version = getattr(pc.info, 'agent_version', '')
+            thumb.update_version(agent_version, MANAGER_VERSION)
+
+            conn_mode = getattr(pc.info, 'connection_mode', '')
+            thumb.update_mode(conn_mode)
 
             if pc.name in self._selected_pcs:
                 thumb.set_selected(True)
@@ -251,7 +324,7 @@ class GridView(QScrollArea):
         thumb = self._thumbnails.get(pc_name)
         pc = self.pc_manager.get_pc(pc_name)
         if thumb and pc:
-            thumb.set_status(pc.status, getattr(pc, 'last_seen_str', ''))
+            thumb.set_status(pc.status)
 
     def _on_thumbnail_received(self, agent_id: str, jpeg_data: bytes):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
@@ -269,6 +342,20 @@ class GridView(QScrollArea):
 
     def _on_agent_disconnected(self, agent_id: str):
         self._push_agents.discard(agent_id)
+        # 연결 해제 시 모드 배지 숨김
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            thumb = self._thumbnails.get(pc.name)
+            if thumb:
+                thumb.update_mode('')
+
+    def _on_connection_mode_changed(self, agent_id: str, mode: str):
+        """연결 모드 변경 시 배지 갱신 (lan / wan / relay)"""
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            thumb = self._thumbnails.get(pc.name)
+            if thumb:
+                thumb.update_mode(mode)
 
     def _request_all_thumbnails(self):
         """push 모드가 아닌 PC들에 대해 폴링 요청"""
@@ -282,6 +369,13 @@ class GridView(QScrollArea):
         else:
             self._selected_pcs.discard(pc_name)
         self.selection_changed.emit(list(self._selected_pcs))
+
+    def _on_update_requested(self, pc_name: str):
+        """에이전트 원격 업데이트 요청"""
+        pc = self.pc_manager.get_pc(pc_name)
+        if pc:
+            logger.info(f"[업데이트] {pc_name} ({pc.agent_id}) 원격 업데이트 요청")
+            self.agent_server.send_update_request(pc.agent_id)
 
     def get_selected_agent_ids(self) -> list:
         """선택된 PC들의 agent_id 목록"""

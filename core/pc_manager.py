@@ -57,6 +57,7 @@ class PCManager:
         agent_server.agent_connected.connect(self._on_agent_connected)
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
         agent_server.thumbnail_received.connect(self._on_thumbnail_received)
+        agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
 
     # ==================== PC 관리 ====================
 
@@ -175,6 +176,12 @@ class PCManager:
                         screen_height=agent_data.get('screen_height', 1080),
                         public_ip=agent_data.get('ip_public', ''),
                         ws_port=agent_data.get('ws_port', 21350),
+                        agent_version=agent_data.get('agent_version', ''),
+                        cpu_model=agent_data.get('cpu_model', ''),
+                        cpu_cores=agent_data.get('cpu_cores', 0),
+                        ram_gb=agent_data.get('ram_gb', 0.0),
+                        motherboard=agent_data.get('motherboard', ''),
+                        gpu_model=agent_data.get('gpu_model', ''),
                     )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
                     existing_pc.server_online = srv_online
@@ -196,6 +203,12 @@ class PCManager:
                         screen_height=agent_data.get('screen_height', 1080),
                         public_ip=agent_data.get('ip_public', ''),
                         ws_port=agent_data.get('ws_port', 21350),
+                        agent_version=agent_data.get('agent_version', ''),
+                        cpu_model=agent_data.get('cpu_model', ''),
+                        cpu_cores=agent_data.get('cpu_cores', 0),
+                        ram_gb=agent_data.get('ram_gb', 0.0),
+                        motherboard=agent_data.get('motherboard', ''),
+                        gpu_model=agent_data.get('gpu_model', ''),
                     )
                     pc = PCDevice(info)
                     pc.server_online = srv_online
@@ -434,6 +447,15 @@ class PCManager:
 
         self.signals.device_status_changed.emit(pc.name)
         logger.info(f"PC 오프라인: {pc.name}")
+
+    def _on_connection_mode_changed(self, agent_id: str, mode: str):
+        """연결 모드 변경 (lan / wan / relay) → PCInfo 업데이트"""
+        pc = self.get_pc_by_agent_id(agent_id)
+        if pc:
+            with self._lock:
+                pc.info.connection_mode = mode
+            self.signals.device_status_changed.emit(pc.name)
+            logger.debug(f"연결 모드 변경: {pc.name} → {mode}")
 
     def _on_thumbnail_received(self, agent_id: str, jpeg_data: bytes):
         """썸네일 수신"""

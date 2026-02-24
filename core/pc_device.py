@@ -29,6 +29,12 @@ class PCInfo:
     public_ip: str = ""     # 공인 IP (LinkIO의 Ip1, P2P WAN용)
     ws_port: int = 21350    # 에이전트 WS 서버 포트 (P2P용)
     connection_mode: str = ""  # "lan" / "wan" / "relay" / "" (P2P 연결 모드)
+    agent_version: str = ""    # 에이전트 소프트웨어 버전 (업데이터용)
+    cpu_model: str = ""
+    cpu_cores: int = 0
+    ram_gb: float = 0.0
+    motherboard: str = ""
+    gpu_model: str = ""
     keymap_name: str = ""   # 지정된 키매핑 이름
     script_name: str = ""   # 지정된 스크립트 이름
 

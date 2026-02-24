@@ -139,7 +139,7 @@ def _show_update_ui() -> bool:
     """
     try:
         import tkinter as tk
-        import tkinter.ttk as ttk  # tkinter.ttk 직접 import
+        from tkinter import ttk
 
         try:
             from version import __version__, __github_repo__, __asset_name__
@@ -151,8 +151,8 @@ def _show_update_ui() -> bool:
         result = {'updated': False}
 
         root = tk.Tk()
-        root.title("WellcomAgent")
-        W, H = 440, 220
+        root.title("WellcomAgent 업데이터")
+        W, H = 420, 200
         root.geometry(f"{W}x{H}")
         root.resizable(False, False)
         root.configure(bg='#1e1e1e')
@@ -162,13 +162,10 @@ def _show_update_ui() -> bool:
         sy = (root.winfo_screenheight() - H) // 2
         root.geometry(f"{W}x{H}+{sx}+{sy}")
 
-        # 앱 이름 + 버전 (크게)
-        tk.Label(root, text="WellcomAgent",
-                 bg='#1e1e1e', fg='#4CAF50',
-                 font=('Segoe UI', 15, 'bold')).pack(pady=(20, 0))
-        tk.Label(root, text=f"v{__version__}",
-                 bg='#1e1e1e', fg='#cccccc',
-                 font=('Segoe UI', 11)).pack(pady=(2, 8))
+        # 타이틀
+        tk.Label(root, text=f"WellcomAgent v{__version__}",
+                 bg='#1e1e1e', fg='#ffffff',
+                 font=('Segoe UI', 14, 'bold')).pack(pady=(22, 4))
 
         # 상태 메시지
         status_var = tk.StringVar(value="업데이트 확인 중...")
@@ -182,8 +179,8 @@ def _show_update_ui() -> bool:
         sty.configure("W.Horizontal.TProgressbar",
                       background='#4CAF50', troughcolor='#333333', thickness=10)
         pb = ttk.Progressbar(root, style="W.Horizontal.TProgressbar",
-                             orient='horizontal', length=390, mode='indeterminate')
-        pb.pack(pady=10)
+                             orient='horizontal', length=380, mode='indeterminate')
+        pb.pack(pady=12)
         pb.start(12)
 
         # 퍼센트/크기 표시
@@ -196,11 +193,17 @@ def _show_update_ui() -> bool:
         def _set_status(msg):
             root.after(0, lambda: status_var.set(msg))
 
+        def _set_pct(msg):
+            root.after(0, lambda: pct_var.set(msg))
+
         def _to_determinate(val=0):
             def _do():
                 pb.stop()
                 pb.configure(mode='determinate', value=val)
             root.after(0, _do)
+
+        def _set_pb(val):
+            root.after(0, lambda: pb.configure(value=val))
 
         def _close_after(ms):
             root.after(ms, root.destroy)
@@ -209,13 +212,9 @@ def _show_update_ui() -> bool:
         def _run():
             try:
                 from pathlib import Path
-                # 배포(app/): __file__ 상위 = app/ 디렉터리 → updater/가 있음
-                # 개발환경: __file__ 상위 = agent/ → 상위상위 = wellcomsoft/ → updater/가 있음
-                _here = os.path.dirname(os.path.abspath(__file__))
-                _parent = os.path.dirname(_here)
-                for _p in (_here, _parent):
-                    if _p not in sys.path:
-                        sys.path.insert(0, _p)
+                _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if _proj not in sys.path:
+                    sys.path.insert(0, _proj)
                 from updater import UpdateChecker
 
                 checker = UpdateChecker(
@@ -224,13 +223,13 @@ def _show_update_ui() -> bool:
                     running_version=__version__,
                 )
 
-                _set_status("업데이트 확인 중...")
+                _set_status("GitHub에서 릴리스 정보 조회 중...")
                 has_update, release = checker.check_update()
 
                 if not has_update:
                     _to_determinate(100)
-                    _set_status(f"✓ 최신 버전입니다")
-                    _close_after(2500)  # 2.5초 표시 (충분히 보임)
+                    _set_status(f"✓ 최신 버전입니다 (v{__version__})")
+                    _close_after(1500)
                     return
 
                 # 업데이트 발견
@@ -255,22 +254,25 @@ def _show_update_ui() -> bool:
 
                 if success:
                     result['updated'] = True
+
                     def _done():
                         pb.configure(value=100)
                         status_var.set("✓ 업데이트 완료 — 재시작 중...")
                         pct_var.set("")
                     root.after(0, _done)
-                    _close_after(1500)
+                    _close_after(1200)
                 else:
                     def _fail():
                         status_var.set("업데이트 실패 — 현재 버전으로 계속 실행")
                         pct_var.set("")
                     root.after(0, _fail)
-                    _close_after(3000)
+                    _close_after(2500)
 
             except Exception as e:
-                _to_determinate(100)
-                _set_status("✓ 실행 준비 완료")
+                def _err():
+                    status_var.set("업데이트 확인 건너뜀")
+                    pct_var.set("")
+                root.after(0, _err)
                 logger.debug(f"업데이트 UI 오류: {e}")
                 _close_after(2000)
 
@@ -358,8 +360,13 @@ class AgentAPIClient:
                        mac_address: str = '',
                        screen_width: int = 1920,
                        screen_height: int = 1080,
-                       agent_version: str = '') -> bool:
-        """에이전트 자신을 서버에 등록 (ip_public, ws_port, agent_version 포함)"""
+                       agent_version: str = '',
+                       cpu_model: str = '',
+                       cpu_cores: int = 0,
+                       ram_gb: float = 0.0,
+                       motherboard: str = '',
+                       gpu_model: str = '') -> bool:
+        """에이전트 자신을 서버에 등록 (ip_public, ws_port, agent_version, 하드웨어 정보 포함)"""
         try:
             r = requests.post(
                 f'{self.config.api_url}/api/agents/register',
@@ -374,12 +381,17 @@ class AgentAPIClient:
                     'screen_width': screen_width,
                     'screen_height': screen_height,
                     'agent_version': agent_version,
+                    'cpu_model': cpu_model,
+                    'cpu_cores': cpu_cores,
+                    'ram_gb': ram_gb,
+                    'motherboard': motherboard,
+                    'gpu_model': gpu_model,
                 },
                 headers=self._headers(),
                 timeout=10,
             )
             r.raise_for_status()
-            logger.info(f"에이전트 등록 성공: {agent_id} (ip={ip}, ip_public={ip_public}, ws_port={ws_port}, v{agent_version})")
+            logger.info(f"에이전트 등록 성공: {agent_id} (ip={ip}, ip_public={ip_public}, ws_port={ws_port}, v{agent_version}, cpu={cpu_model})")
             return True
         except Exception as e:
             logger.error(f"에이전트 등록 실패: {e}")
@@ -471,6 +483,14 @@ class WellcomAgent:
         self._ws_port = self.config.ws_port or 21350
         self._agent_version = ""  # start()에서 version.py 로드
 
+        # UPnP
+        self._upnp = None
+
+        # 연결 상태 플래그 (트레이 아이콘 동적 업데이트용)
+        self._relay_connected = False       # 서버 릴레이 연결 여부
+        self._server_logged_in = False      # 서버 로그인 성공 여부
+        self._tray_icon_obj = None          # pystray Icon 객체 참조
+
         # 다중 매니저 관리
         self._managers: Dict[str, object] = {}       # manager_id → websocket
         self._stream_tasks: Dict[str, asyncio.Task] = {}
@@ -487,6 +507,180 @@ class WellcomAgent:
             'ip_public': self._public_ip,
             'mac_address': self._mac_address,
         }
+
+    def _get_hardware_info(self) -> dict:
+        """하드웨어 정보 수집 (CPU/RAM/MB/GPU)"""
+        info = {'cpu_model': '', 'cpu_cores': 0, 'ram_gb': 0.0,
+                'motherboard': '', 'gpu_model': ''}
+        try:
+            import psutil
+            info['cpu_cores'] = psutil.cpu_count(logical=False) or 0
+            info['ram_gb'] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+        except Exception:
+            pass
+        try:
+            info['cpu_model'] = platform.processor()
+        except Exception:
+            pass
+        if platform.system() == 'Windows':
+            try:
+                r = subprocess.run(
+                    ['wmic', 'baseboard', 'get', 'Manufacturer,Product'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace'
+                )
+                lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    info['motherboard'] = lines[1]
+            except Exception:
+                pass
+            try:
+                r = subprocess.run(
+                    ['wmic', 'path', 'win32_VideoController', 'get', 'Name'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace'
+                )
+                lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    info['gpu_model'] = lines[1]
+            except Exception:
+                pass
+        return info
+
+    def _setup_upnp(self) -> bool:
+        """UPnP로 WS 포트 자동 개방"""
+        try:
+            import miniupnpc
+            upnp = miniupnpc.UPnP()
+            upnp.discoverdelay = 200
+            discovered = upnp.discover()
+            if not discovered:
+                logger.info("[UPnP] 라우터 발견 실패 — 릴레이로 폴백")
+                return False
+            upnp.selectigd()
+            local_ip = self._local_ip
+            upnp.addportmapping(
+                self._ws_port, 'TCP', local_ip, self._ws_port,
+                'WellcomAgent', ''
+            )
+            external_ip = upnp.externalipaddress()
+            if external_ip:
+                self._public_ip = external_ip
+            self._upnp = upnp
+            logger.info(f"[UPnP] 포트 {self._ws_port} 개방 성공, 공인IP: {external_ip}")
+            return True
+        except ImportError:
+            logger.debug("[UPnP] miniupnpc 미설치 — 릴레이로 폴백")
+            return False
+        except Exception as e:
+            logger.info(f"[UPnP] 포트 개방 실패 ({e}) — 릴레이로 폴백")
+            return False
+
+    def _cleanup_upnp(self):
+        """UPnP 포트 매핑 제거"""
+        if self._upnp:
+            try:
+                self._upnp.deleteportmapping(self._ws_port, 'TCP')
+                logger.info(f"[UPnP] 포트 {self._ws_port} 매핑 제거")
+            except Exception:
+                pass
+            self._upnp = None
+
+    @staticmethod
+    def _add_firewall_rule(ws_port: int):
+        """Windows 방화벽 TCP 인바운드 규칙 추가 (포트 21350 직접 P2P용)"""
+        if platform.system() != 'Windows':
+            return
+        rule_name = 'WellcomAgent'
+        try:
+            chk = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
+                capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace',
+            )
+            if rule_name in chk.stdout:
+                logger.debug(f"[Firewall] 규칙 이미 존재: {rule_name}")
+                return
+            res = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                 f'name={rule_name}', 'protocol=TCP', 'dir=in',
+                 f'localport={ws_port}', 'action=allow',
+                 'description=WellcomSOFT Agent P2P Port'],
+                capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace',
+            )
+            if res.returncode == 0:
+                logger.info(f"[Firewall] 포트 {ws_port} TCP 인바운드 규칙 추가")
+            else:
+                logger.info("[Firewall] 규칙 추가 실패 (관리자 권한 필요) — 릴레이 폴백 사용")
+        except Exception as e:
+            logger.debug(f"[Firewall] 오류: {e}")
+
+    async def _relay_outbound_loop(self):
+        """서버 릴레이 아웃바운드 연결 유지 (포트 개방 불필요 폴백)
+
+        에이전트가 서버에 먼저 연결 → 매니저가 서버 릴레이를 통해 에이전트 제어.
+        TeamViewer/AnyDesk 방식 — 어떤 NAT/방화벽에서도 동작.
+        """
+        if not self.api_client or not self.api_client.token:
+            return
+
+        base = self.config.api_url
+        if base.startswith('https://'):
+            base = 'wss://' + base[8:]
+        elif base.startswith('http://'):
+            base = 'ws://' + base[7:]
+        elif not base.startswith(('ws://', 'wss://')):
+            base = 'ws://' + base
+        ws_url = f"{base}/ws/agent?token={self.api_client.token}"
+
+        while self._running:
+            try:
+                logger.info(f"[Relay] 서버 릴레이 아웃바운드 연결: {base}/ws/agent")
+                async with websockets.connect(
+                    ws_url,
+                    max_size=50 * 1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=20,
+                ) as ws:
+                    # 핸드셰이크
+                    await ws.send(json.dumps({
+                        'type': 'agent_hello',
+                        'agent_id': self._agent_id,
+                    }))
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    resp = json.loads(raw)
+                    if resp.get('type') != 'relay_ok':
+                        logger.warning(f"[Relay] 핸드셰이크 실패: {resp}")
+                        break
+
+                    logger.info("[Relay] 서버 릴레이 연결 성공 — 매니저 폴백 대기 중")
+                    self._relay_connected = True
+                    self._update_tray_icon()
+
+                    # 매니저 메시지 처리 루프 (서버가 매니저의 메시지를 에이전트에게 전달)
+                    async for message in ws:
+                        if not self._running:
+                            break
+                        if isinstance(message, str):
+                            await self._handle_text(ws, message, 'relay')
+                        elif isinstance(message, bytes):
+                            await self._handle_binary(ws, message, 'relay')
+
+            except asyncio.CancelledError:
+                self._relay_connected = False
+                self._update_tray_icon()
+                return
+            except Exception as e:
+                if self._running:
+                    logger.warning(f"[Relay] 연결 끊김: {type(e).__name__} — 30초 후 재연결")
+            self._relay_connected = False
+            self._update_tray_icon()
+            if self._running:
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    return
 
     @staticmethod
     def _ask_server_config(current_url: str = '') -> tuple:
@@ -598,11 +792,12 @@ class WellcomAgent:
         return self.api_client.login(username, password)
 
     def _register_self(self):
-        """서버에 에이전트 자신을 등록 (ip_public, ws_port 포함)"""
+        """서버에 에이전트 자신을 등록 (ip_public, ws_port, 하드웨어 정보 포함)"""
         if not self.api_client:
             return
 
         sys_info = self._get_system_info()
+        hw_info = self._get_hardware_info()
         screen_w, screen_h = self.screen_capture.screen_size
 
         self.api_client.register_agent(
@@ -616,6 +811,11 @@ class WellcomAgent:
             screen_width=screen_w,
             screen_height=screen_h,
             agent_version=self._agent_version,
+            cpu_model=hw_info['cpu_model'],
+            cpu_cores=hw_info['cpu_cores'],
+            ram_gb=hw_info['ram_gb'],
+            motherboard=hw_info['motherboard'],
+            gpu_model=hw_info['gpu_model'],
         )
 
     def _heartbeat_loop(self):
@@ -670,11 +870,19 @@ class WellcomAgent:
         self._public_ip = _get_public_ip()
         logger.info(f"사설IP: {self._local_ip}, 공인IP: {self._public_ip or '조회 실패'}")
 
-        # 2. 서버 로그인 + 등록
+        # 2. UPnP 포트 자동 개방 (성공 시 공인IP 갱신)
+        self._setup_upnp()
+
+        # 2-b. Windows 방화벽 인바운드 규칙 추가 (P2P LAN/WAN용)
+        self._add_firewall_rule(self._ws_port)
+
+        # 3. 서버 로그인 + 등록
         if self.config.api_url:
             if not self._server_login():
                 logger.warning("서버 로그인 실패 — WS 서버만 시작")
+                self._server_logged_in = False
             else:
+                self._server_logged_in = True
                 self._register_self()
 
                 # 하트비트 시작
@@ -683,17 +891,17 @@ class WellcomAgent:
                 )
                 self._heartbeat_thread.start()
 
-        # 3. 클립보드 감시
+        # 4. 클립보드 감시
         if self.config.clipboard_sync:
             self.clipboard.start_monitoring(self._on_clipboard_changed)
 
-        # 4. 트레이 아이콘
+        # 5. 트레이 아이콘
         self._tray_thread = threading.Thread(
             target=self._run_tray, daemon=True, name='TrayIcon'
         )
         self._tray_thread.start()
 
-        # 5. WS 서버 시작 (P2P — 매니저 접속 대기)
+        # 6. WS 서버 시작 (P2P — 매니저 접속 대기)
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
@@ -703,22 +911,13 @@ class WellcomAgent:
         finally:
             if self.api_client:
                 self.api_client.report_offline(self._agent_id)
+            self._cleanup_upnp()
             self.clipboard.stop_monitoring()
             self.screen_capture.close()
 
     async def _run_server(self):
-        """WS 서버(LAN P2P) + 서버 릴레이 클라이언트(WAN) 동시 실행"""
-        tasks = [asyncio.create_task(self._run_p2p_server())]
-        # 서버 릴레이 (WAN 폴백 — 포트포워딩 불필요)
-        if self.config.api_url and self.config.api_token:
-            tasks.append(asyncio.create_task(self._run_relay_client()))
-        try:
-            await asyncio.gather(*tasks)
-        except Exception as e:
-            logger.error(f"서버 실행 오류: {e}")
-
-    async def _run_p2p_server(self):
-        """P2P WS 서버 (LAN 직접 연결용, 포트 21350)"""
+        """WS 서버 시작 (직접 P2P) + 서버 릴레이 아웃바운드 (폴백) — 병렬 실행"""
+        relay_task = None
         try:
             async with websockets.serve(
                 self._handle_manager,
@@ -727,73 +926,21 @@ class WellcomAgent:
                 ping_interval=20,
                 ping_timeout=20,
             ):
-                logger.info(f"★ P2P WS 서버: 0.0.0.0:{self._ws_port} (LAN 직접 연결)")
+                logger.info(f"★ WS 서버 시작: 0.0.0.0:{self._ws_port} (P2P 직접 + 릴레이 폴백)")
+                # 서버 릴레이 아웃바운드 연결 병렬 시작
+                if self.api_client and self.api_client.token and self.config.api_url:
+                    relay_task = asyncio.create_task(self._relay_outbound_loop())
                 while self._running:
                     await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"P2P WS 서버 오류: {e}")
-
-    async def _run_relay_client(self):
-        """서버 릴레이 클라이언트 — /ws/agent에 연결하여 WAN 폴백 지원.
-
-        에이전트가 방화벽/NAT 뒤에 있어도 매니저가 서버 릴레이를 통해 연결 가능.
-        포트포워딩 불필요.
-        """
-        url = self.config.api_url or ''
-        if url.startswith('https://'):
-            ws_base = 'wss://' + url[8:]
-        elif url.startswith('http://'):
-            ws_base = 'ws://' + url[7:]
-        else:
-            ws_base = url
-        # 끝 / 제거
-        ws_base = ws_base.rstrip('/')
-        ws_url = f"{ws_base}/ws/agent?token={self.config.api_token}"
-
-        RELAY_ID = '__relay__'
-
-        while self._running:
-            try:
-                async with websockets.connect(
-                    ws_url,
-                    max_size=50 * 1024 * 1024,
-                    ping_interval=20,
-                    ping_timeout=20,
-                ) as ws:
-                    # 에이전트 등록 (agent_id, 호스트명, ws_port 전달)
-                    await ws.send(json.dumps({
-                        'type': 'auth',
-                        'agent_id': self._agent_id,
-                        'hostname': socket.gethostname(),
-                        'ws_port': self._ws_port,
-                    }))
-                    logger.info("★ 서버 릴레이 연결 성공 — WAN 폴백 활성")
-                    self._managers[RELAY_ID] = ws
-
-                    try:
-                        async for message in ws:
-                            if not self._running:
-                                break
-                            if isinstance(message, str):
-                                await self._handle_text(ws, message, RELAY_ID)
-                            elif isinstance(message, bytes):
-                                await self._handle_binary(ws, message, RELAY_ID)
-                    finally:
-                        self._managers.pop(RELAY_ID, None)
-                        task = self._stream_tasks.pop(RELAY_ID, None)
-                        if task:
-                            task.cancel()
-                        task = self._thumbnail_tasks.pop(RELAY_ID, None)
-                        if task:
-                            task.cancel()
-                        self._stream_settings.pop(RELAY_ID, None)
-                        logger.info("서버 릴레이 연결 종료")
-
-            except Exception as e:
-                logger.debug(f"릴레이 연결 오류: {e}")
-
-            if self._running:
-                await asyncio.sleep(10)  # 재연결 대기
+            logger.error(f"WS 서버 오류: {e}")
+        finally:
+            if relay_task and not relay_task.done():
+                relay_task.cancel()
+                try:
+                    await relay_task
+                except asyncio.CancelledError:
+                    pass
 
     async def _handle_manager(self, websocket):
         """매니저 연결 핸들러"""
@@ -830,6 +977,7 @@ class WellcomAgent:
 
             # 4. 연결 수락
             self._managers[manager_id] = websocket
+            self._update_tray_icon()
             screen_w, screen_h = self.screen_capture.screen_size
             await websocket.send(json.dumps({
                 'type': 'auth_ok',
@@ -859,6 +1007,7 @@ class WellcomAgent:
         finally:
             if manager_id:
                 self._managers.pop(manager_id, None)
+                self._update_tray_icon()
                 # 해당 매니저의 스트림/썸네일 태스크 정리
                 task = self._stream_tasks.pop(manager_id, None)
                 if task:
@@ -1130,16 +1279,50 @@ class WellcomAgent:
                 except Exception:
                     pass
 
+    def _make_tray_icon_image(self, color_rgb: tuple) -> 'Image':
+        """상태 색상에 맞는 트레이 아이콘 이미지 생성"""
+        from PIL import Image, ImageDraw
+        img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        r, g, b = color_rgb
+        draw.ellipse([4, 4, 60, 60], fill=(r, g, b, 255))
+        # 'W' 문자
+        draw.line([(14, 16), (22, 48), (32, 28), (42, 48), (50, 16)],
+                  fill=(255, 255, 255, 255), width=5)
+        return img
+
+    def _get_tray_status(self) -> tuple:
+        """(색상RGB, 툴팁문자열) — 현재 연결 상태에 맞는 값 반환"""
+        n = len(self._managers)
+        if n > 0:
+            # 매니저가 직접 연결 중 → 초록
+            return (34, 197, 94), f"WellcomAgent — 연결 중 (매니저 {n}개)"
+        elif self._relay_connected:
+            # 릴레이 연결됨, 매니저 대기 중 → 파랑
+            return (33, 150, 243), f"WellcomAgent — 릴레이 대기 중 (포트 {self._ws_port})"
+        elif self._server_logged_in:
+            # 서버 로그인됨, 릴레이 미연결 → 노랑
+            return (234, 179, 8), f"WellcomAgent — 서버 연결 중 (포트 {self._ws_port})"
+        else:
+            # 서버 미연결 → 회색
+            return (120, 120, 120), f"WellcomAgent — 오프라인 (포트 {self._ws_port})"
+
+    def _update_tray_icon(self):
+        """트레이 아이콘 색상 및 툴팁 동적 업데이트"""
+        try:
+            if self._tray_icon_obj is None:
+                return
+            color, tooltip = self._get_tray_status()
+            self._tray_icon_obj.icon = self._make_tray_icon_image(color)
+            self._tray_icon_obj.title = tooltip
+        except Exception:
+            pass
+
     def _run_tray(self):
-        """시스템 트레이 아이콘"""
+        """시스템 트레이 아이콘 (LinkIO 스타일 — 동적 상태 표시)"""
         try:
             import pystray
             from PIL import Image, ImageDraw
-
-            img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            draw.ellipse([8, 8, 56, 56], fill=(33, 150, 243, 255))
-            draw.text((20, 18), 'S', fill=(255, 255, 255, 255))
 
             def on_quit(icon, item):
                 self._running = False
@@ -1148,45 +1331,117 @@ class WellcomAgent:
                 icon.stop()
                 os._exit(0)
 
-            def on_show_info(icon, item):
-                n = len(self._managers)
-                status = f"매니저 {n}개 연결" if n > 0 else "대기 중"
-                logger.info(
-                    f"WellcomAgent v{self._agent_version} | "
-                    f"WS: 0.0.0.0:{self._ws_port} | {status}"
-                )
-                if self.config.api_url:
-                    logger.info(f"서버: {self.config.api_url}")
+            def on_show_status(icon, item):
+                """연결 상태 팝업 (tkinter)"""
+                try:
+                    import tkinter as tk
+                    from tkinter import ttk
 
-            ver = self._agent_version or '?'
+                    root = tk.Tk()
+                    root.title("WellcomAgent 상태")
+                    root.configure(bg='#1e1e1e')
+                    root.resizable(False, False)
+                    root.attributes('-topmost', True)
+                    W, H = 380, 300
+                    sw = root.winfo_screenwidth()
+                    sh = root.winfo_screenheight()
+                    root.geometry(f"{W}x{H}+{sw - W - 20}+{sh - H - 60}")
+
+                    tk.Label(root, text="WellcomAgent 연결 상태",
+                             font=('맑은 고딕', 12, 'bold'),
+                             bg='#1e1e1e', fg='#ffffff').pack(pady=(15, 5))
+
+                    ttk.Separator(root).pack(fill='x', padx=15)
+
+                    frame = tk.Frame(root, bg='#1e1e1e')
+                    frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+                    n = len(self._managers)
+                    color, _ = self._get_tray_status()
+                    hex_color = f'#{color[0]:02x}{color[1]:02x}{color[2]:02x}'
+
+                    rows = [
+                        ("버전",       self._agent_version or "알 수 없음"),
+                        ("호스트명",   socket.gethostname()),
+                        ("사설 IP",    self._local_ip),
+                        ("공인 IP",    self._public_ip or "조회 실패"),
+                        ("WS 포트",    str(self._ws_port)),
+                        ("서버",       self.config.api_url or "미설정"),
+                        ("서버 연결",  "✓ 로그인됨" if self._server_logged_in else "✗ 미연결"),
+                        ("릴레이",     "✓ 연결됨" if self._relay_connected else "✗ 대기"),
+                        ("매니저 수",  f"{n}개 연결 중" if n > 0 else "없음"),
+                    ]
+                    for label, value in rows:
+                        row = tk.Frame(frame, bg='#1e1e1e')
+                        row.pack(fill='x', pady=1)
+                        tk.Label(row, text=f"{label}:", width=10, anchor='e',
+                                 bg='#1e1e1e', fg='#888888',
+                                 font=('맑은 고딕', 9)).pack(side='left')
+                        fg = hex_color if label in ("서버 연결", "릴레이", "매니저 수") else '#ffffff'
+                        tk.Label(row, text=value, anchor='w',
+                                 bg='#1e1e1e', fg=fg,
+                                 font=('맑은 고딕', 9)).pack(side='left', padx=5)
+
+                    ttk.Separator(root).pack(fill='x', padx=15)
+                    tk.Button(root, text="닫기", command=root.destroy,
+                              bg='#333333', fg='#ffffff',
+                              relief='flat', padx=20, pady=5).pack(pady=10)
+                    root.mainloop()
+                except Exception as e:
+                    logger.warning(f"상태 팝업 오류: {e}")
+
+            def on_reconnect(icon, item):
+                """서버 재연결"""
+                try:
+                    if self.api_client:
+                        self._server_logged_in = self.api_client.verify_token()
+                        if not self._server_logged_in:
+                            self._server_logged_in = self._server_login()
+                        if self._server_logged_in:
+                            self._register_self()
+                        self._update_tray_icon()
+                except Exception as e:
+                    logger.warning(f"재연결 실패: {e}")
+
+            def on_restart(icon, item):
+                """에이전트 재시작"""
+                icon.stop()
+                _restart_agent()
+
+            # 초기 아이콘 (회색)
+            init_img = self._make_tray_icon_image((120, 120, 120))
+
             menu = pystray.Menu(
-                # 버전 정보 (회색, 클릭 불가)
-                pystray.MenuItem(
-                    f'WellcomAgent  v{ver}',
-                    None,
-                    enabled=False,
-                ),
-                pystray.Menu.SEPARATOR,
-                # 연결 상태 (기본 항목 — 더블클릭/좌클릭)
                 pystray.MenuItem(
                     lambda item: (
-                        f'연결: {len(self._managers)}개  |  P2P:{self._ws_port}'
+                        f'WellcomAgent v{self._agent_version}'
+                        if self._agent_version else 'WellcomAgent'
                     ),
-                    on_show_info,
+                    on_show_status,
                     default=True,
+                    enabled=True,
                 ),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem('연결 상태 보기', on_show_status),
+                pystray.MenuItem('서버 재연결', on_reconnect),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem('재시작', on_restart),
                 pystray.MenuItem('종료', on_quit),
             )
 
-            icon = pystray.Icon(
-                'WellcomAgent', img,
-                f'WellcomAgent v{ver}',  # 마우스오버 툴팁
-                menu,
-            )
+            _, init_tooltip = self._get_tray_status()
+            icon = pystray.Icon('WellcomAgent', init_img, init_tooltip, menu)
+            self._tray_icon_obj = icon
+
+            # 1초 뒤 초기 상태 반영
+            def _delayed_update():
+                time.sleep(1)
+                self._update_tray_icon()
+            threading.Thread(target=_delayed_update, daemon=True).start()
+
             icon.run()
         except ImportError:
-            logger.warning("pystray 미설치 — 트레이 아이콘 없이 실행")
+            logger.warning("pystray/Pillow 미설치 — 트레이 아이콘 없이 실행")
         except Exception as e:
             logger.warning(f"트레이 아이콘 실패: {e}")
 

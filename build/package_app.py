@@ -55,6 +55,7 @@ APP_FILES = [
     'ui/script_editor.py',
     'ui/keymap_editor.py',
     'ui/recording_panel.py',
+    'ui/pc_info_dialog.py',
     'updater/__init__.py',
     'updater/github_client.py',
     'updater/update_checker.py',
