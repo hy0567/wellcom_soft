@@ -292,17 +292,46 @@ HEADER_H264_DELTA = 0x04
 
 
 def _get_public_ip() -> str:
-    """공인IP 조회 (LinkIO의 Ip1)"""
-    for url in ['https://api.ipify.org', 'https://ifconfig.me/ip',
-                'https://icanhazip.com', 'https://checkip.amazonaws.com']:
+    """공인IP 조회 — 여러 서비스 시도 + STUN 폴백"""
+    # 1차: HTTP 기반 IP 조회 서비스
+    services = [
+        'https://api.ipify.org',
+        'https://ifconfig.me/ip',
+        'https://icanhazip.com',
+        'https://checkip.amazonaws.com',
+        'https://api.my-ip.io/v2/ip.txt',
+        'https://ipecho.net/plain',
+        'http://ip.jsontest.com/',
+    ]
+    for url in services:
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=5, headers={'User-Agent': 'curl/8.0'})
             if r.status_code == 200:
-                ip = r.text.strip()
-                if ip and '.' in ip:
-                    return ip
+                text = r.text.strip()
+                # JSON 응답 처리 (jsontest)
+                if text.startswith('{'):
+                    import json as _json
+                    text = _json.loads(text).get('ip', '')
+                if text and '.' in text and len(text) <= 15:
+                    logger.debug(f"공인IP 조회 성공 ({url}): {text}")
+                    return text
         except Exception:
             continue
+
+    # 2차: UDP 소켓으로 외부 서버에 연결하여 로컬 IP 확인 (NAT 환경에서는 사설IP)
+    # 이 방법은 실제 공인IP를 반환하지 않을 수 있지만, 라우터가 NAT 없이 직접 연결된 경우 유효
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(3)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith(('10.', '172.', '192.168.', '127.')):
+                logger.debug(f"공인IP (UDP): {ip}")
+                return ip
+    except Exception:
+        pass
+
+    logger.warning("공인IP 조회 실패: 모든 방법 실패")
     return ''
 
 

@@ -106,6 +106,23 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
     _relay_agent_info[agent_id] = {"real_ip": agent_real_ip, "ws_port": agent_ws_port}
     await websocket.send_text(json.dumps({"type": "relay_ok"}))
 
+    # DB에 에이전트의 실제 공인IP 업데이트 (ip_public이 비어있으면 채워줌)
+    if agent_real_ip:
+        try:
+            owner_id = payload.get("user_id") or payload.get("sub")
+            if owner_id:
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE agents SET ip_public = %s
+                            WHERE agent_id = %s AND owner_id = %s
+                              AND (ip_public IS NULL OR ip_public = '')
+                        """, (agent_real_ip, agent_id, owner_id))
+                        if cur.rowcount:
+                            print(f"[Relay] DB ip_public 업데이트: {agent_id} → {agent_real_ip}")
+        except Exception as e:
+            print(f"[Relay] DB ip_public 업데이트 실패: {e}")
+
     # 매니저들에게 에이전트 접속 알림 (real_ip + ws_port 포함 → P2P 직접 연결용)
     notify = json.dumps({
         "type": "agent_connected",
