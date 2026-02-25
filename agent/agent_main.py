@@ -58,6 +58,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger('WellcomAgent')
 
+
+# ──────────── 의존성 자동 설치 ────────────
+
+def _auto_install_packages():
+    """H.264 인코딩에 필요한 PyAV 자동 설치 (소스 실행 환경 전용)
+
+    PyInstaller 빌드에서는 이미 번들되어 있으므로 스킵.
+    """
+    if getattr(sys, 'frozen', False):
+        return  # PyInstaller 빌드 — pip 불필요
+
+    packages = [
+        ('av', 'av'),         # PyAV — H.264 인코딩
+        ('numpy', 'numpy'),   # numpy — 프레임 변환
+    ]
+
+    missing = []
+    for module_name, pip_name in packages:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(pip_name)
+
+    if not missing:
+        return
+
+    logger.info(f"[의존성] 누락 패키지 감지: {', '.join(missing)} — 자동 설치 중...")
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--quiet'] + missing,
+            capture_output=True, text=True, timeout=300,
+            encoding='utf-8', errors='replace',
+        )
+        if result.returncode == 0:
+            logger.info(f"[의존성] 설치 완료: {', '.join(missing)}")
+        else:
+            logger.warning(f"[의존성] 설치 실패 (returncode={result.returncode}): "
+                           f"{result.stderr[:300]}")
+    except subprocess.TimeoutExpired:
+        logger.warning("[의존성] 설치 타임아웃 (300초)")
+    except Exception as e:
+        logger.warning(f"[의존성] 설치 오류: {e}")
+
 STARTUP_REG_KEY = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
 STARTUP_REG_NAME = 'WellcomAgent'
 
@@ -923,7 +966,10 @@ class WellcomAgent:
         self._agent_version = _ver
         logger.info(f"★ WellcomSOFT Agent v{_ver} (P2P WS 서버 모드)")
 
-        # 0. 업데이트 확인 팝업 (버전 표시 + 프로그레스바)
+        # 0-a. 의존성 자동 설치 (PyAV 등 — H.264 인코딩용)
+        _auto_install_packages()
+
+        # 0-b. 업데이트 확인 팝업 (버전 표시 + 프로그레스바)
         if _show_update_ui():
             _restart_agent()
             return  # 업데이트 후 재시작됨

@@ -222,6 +222,52 @@ def _restart_application():
     sys.exit(0)
 
 
+# ==================== 의존성 자동 설치 ====================
+
+def _auto_install_packages():
+    """H.264 디코딩에 필요한 PyAV 자동 설치 (소스 실행 환경 전용)
+
+    PyInstaller 빌드에서는 이미 번들되어 있으므로 스킵.
+    h264_decoder.py가 모듈 레벨에서 import av를 하므로,
+    PyQt6/core 모듈 import 전에 호출해야 합니다.
+    """
+    if getattr(sys, 'frozen', False):
+        return  # PyInstaller 빌드 — pip 불필요
+
+    _log = logging.getLogger('WellcomSOFT')
+    packages = [
+        ('av', 'av'),         # PyAV — H.264 디코딩
+        ('numpy', 'numpy'),   # numpy — 프레임 변환
+    ]
+
+    missing = []
+    for module_name, pip_name in packages:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(pip_name)
+
+    if not missing:
+        return
+
+    _log.info(f"[의존성] 누락 패키지 감지: {', '.join(missing)} — 자동 설치 중...")
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--quiet'] + missing,
+            capture_output=True, text=True, timeout=300,
+            encoding='utf-8', errors='replace',
+        )
+        if result.returncode == 0:
+            _log.info(f"[의존성] 설치 완료: {', '.join(missing)}")
+        else:
+            _log.warning(f"[의존성] 설치 실패 (returncode={result.returncode}): "
+                         f"{result.stderr[:300]}")
+    except subprocess.TimeoutExpired:
+        _log.warning("[의존성] 설치 타임아웃 (300초)")
+    except Exception as e:
+        _log.warning(f"[의존성] 설치 오류: {e}")
+
+
 # ==================== 메인 ====================
 
 def main():
@@ -234,6 +280,9 @@ def main():
     logger.info(f"Base: {BASE_DIR}")
     logger.info(f"Python: {sys.version}")
     logger.info("=" * 50)
+
+    # ★ 의존성 자동 설치 (PyAV 등) — core/h264_decoder.py import 전에 실행
+    _auto_install_packages()
 
     # PyQt6
     from PyQt6.QtWidgets import QApplication
