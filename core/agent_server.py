@@ -645,6 +645,13 @@ class AgentServer(QObject):
                         on_control=lambda msg, aid=agent_id: self._on_udp_control(aid, msg),
                         on_video=lambda t, d, aid=agent_id: self._on_udp_video(aid, t, d),
                     )
+                    # 에이전트에 thumbnail push 재시작 (UDP 채널 경유)
+                    self._send_to_agent(agent_id, {
+                        'type': 'stop_thumbnail_push'
+                    })
+                    self._send_to_agent(agent_id, {
+                        'type': 'start_thumbnail_push', 'interval': 1.0
+                    })
                     return
 
             # P2P 실패 — 릴레이 유지, 쿨다운 시작

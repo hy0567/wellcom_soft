@@ -89,8 +89,8 @@ class Settings:
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
             'stream_fps': 15,             # 전체 화면 스트리밍 FPS
             'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
-            'thumbnail_quality': 40,      # 썸네일 JPEG 품질
-            'thumbnail_width': 320,       # 썸네일 최대 너비
+            'thumbnail_quality': 50,      # 썸네일 JPEG 품질 (40→50 개선)
+            'thumbnail_width': 480,       # 썸네일 최대 너비 (320→480 개선)
         },
         'grid_view': {
             'columns': 5,                 # 기본 5컬럼 (LinkIO 기준)

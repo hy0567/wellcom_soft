@@ -200,11 +200,12 @@ class PCThumbnailWidget(QFrame):
             )
 
     def update_mode(self, mode: str):
-        """연결 모드 배지 갱신 (lan / wan / relay / '')"""
+        """연결 모드 배지 갱신 (lan / wan / udp_p2p / relay / '')"""
         MODE_STYLES = {
-            'lan':   ('LAN',  '#27ae60', '#fff'),   # 초록
-            'wan':   ('WAN',  '#2980b9', '#fff'),   # 파랑
-            'relay': ('릴레이', '#d35400', '#fff'),  # 주황
+            'lan':     ('LAN',   '#27ae60', '#fff'),   # 초록
+            'udp_p2p': ('UDP',   '#8e44ad', '#fff'),   # 보라 — NAT 홀펀칭 P2P
+            'wan':     ('WAN',   '#2980b9', '#fff'),   # 파랑
+            'relay':   ('릴레이', '#d35400', '#fff'),   # 주황
         }
         if mode in MODE_STYLES:
             text, bg, fg = MODE_STYLES[mode]
