@@ -91,13 +91,26 @@ class UdpChannel:
         self._running = False
         if self._recv_task:
             self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._ping_task:
             self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # ACK 대기 중인 future 취소
         for fut in self._ack_futures.values():
             if not fut.done():
                 fut.cancel()
         self._ack_futures.clear()
+        # 소켓 닫기
+        try:
+            self._sock.close()
+        except Exception:
+            pass
 
     # ──────────── 전송 ────────────
 

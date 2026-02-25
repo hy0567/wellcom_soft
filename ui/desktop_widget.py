@@ -449,6 +449,7 @@ class DesktopWidget(QMainWindow):
         self._server.h264_frame_received.connect(self._on_h264_frame)
         self._server.stream_started.connect(self._on_stream_started)
         self._server.agent_disconnected.connect(self._on_agent_disconnected)
+        self._server.connection_mode_changed.connect(self._on_connection_mode_changed)
 
     def _load_geometry(self):
         """저장된 창 위치/크기 복원"""
@@ -572,6 +573,40 @@ class DesktopWidget(QMainWindow):
         )
         self._update_conn_state('disconnected')
         self._screen.set_overlay_text('❌ 에이전트 연결 끊김', '#F44336')
+
+    def _on_connection_mode_changed(self, agent_id: str, mode: str):
+        """연결 모드 변경 시 스트리밍 재시작 (릴레이→UDP 전환 등)"""
+        if agent_id != self._pc.agent_id:
+            return
+        if not self._stream_requested:
+            return
+
+        logger.info(f"[{self._pc.name}] 연결 모드 변경: {mode} — 스트림 재시작")
+        # 기존 H.264 디코더 리셋
+        if self._h264_decoder:
+            self._h264_decoder.close()
+            self._h264_decoder = None
+        self._total_frame_count = 0
+        self._fps_frame_count = 0
+        self._stream_start_time = time.time()
+        self._update_conn_state('waiting')
+        self._screen.set_overlay_text('🔄 연결 전환 — 스트림 재시작 중...')
+
+        preferred_codec = settings.get('screen.stream_codec', 'h264')
+        keyframe_interval = settings.get('screen.keyframe_interval', 60)
+        if preferred_codec == 'h264':
+            test_decoder = H264Decoder()
+            if not test_decoder.is_available:
+                preferred_codec = 'mjpeg'
+            test_decoder.close()
+
+        self._server.start_streaming(
+            self._pc.agent_id,
+            fps=self._current_target_fps,
+            quality=self._current_quality,
+            codec=preferred_codec,
+            keyframe_interval=keyframe_interval,
+        )
 
     # ==================== H.264 프레임 수신 (v2.0.2) ====================
 
@@ -962,6 +997,7 @@ class DesktopWidget(QMainWindow):
             (self._server.h264_frame_received, self._on_h264_frame),
             (self._server.stream_started, self._on_stream_started),
             (self._server.agent_disconnected, self._on_agent_disconnected),
+            (self._server.connection_mode_changed, self._on_connection_mode_changed),
         ]:
             try:
                 sig.disconnect(slot)

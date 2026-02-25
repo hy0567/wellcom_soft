@@ -2,7 +2,7 @@
 
 v3.0.0: 서버 릴레이 → P2P 직접 연결
 - 에이전트별 독립 WS 연결 (1 에이전트 = 1 WebSocket)
-- 연결 우선순위: LAN(ip2) → WAN(ip1) → 서버 릴레이(폴백)
+- 연결 우선순위: WAN(ip1) → UDP 홀펀칭 → 서버 릴레이(폴백)
 - 시그널 인터페이스 100% 기존 호환 (UI 변경 없음)
 
 클래스명 AgentServer 유지 (UI 코드 변경 최소화).
@@ -71,7 +71,7 @@ class AgentServer(QObject):
 
     v3.0.0: 서버 릴레이 → P2P 직접 연결
     - 에이전트별 독립 WS 연결 (1 에이전트 = 1 WebSocket)
-    - 연결 우선순위: LAN(ip2) → WAN(ip1) → 서버 릴레이(폴백)
+    - 연결 우선순위: WAN(ip1) → UDP 홀펀칭 → 서버 릴레이(폴백)
     - 시그널 인터페이스 100% 기존 호환
     """
 
@@ -165,17 +165,33 @@ class AgentServer(QObject):
 
     def connect_to_agent(self, agent_id: str, ip_private: str,
                          ip_public: str, ws_port: int = 21350):
-        """에이전트에 P2P 연결 시도 (LAN→WAN→릴레이)"""
+        """에이전트에 P2P 연결 시도 (WAN→UDP홀펀칭→릴레이)
+
+        중복 호출 안전: 같은 agent_id에 대해 여러 번 호출해도
+        기존 AgentConnection 객체를 재사용하여 race condition 방지.
+        """
         conn = self._connections.get(agent_id)
-        if conn and conn.mode != ConnectionMode.DISCONNECTED:
-            # 이미 연결됨 — IP 정보 업데이트 (빈 값으로 기존 값 덮어쓰지 않음)
+
+        if not conn:
+            # 신규 에이전트 — 새 연결 객체 생성
+            conn = AgentConnection(
+                agent_id=agent_id,
+                ip_private=ip_private,
+                ip_public=ip_public,
+                ws_port=ws_port,
+            )
+            self._connections[agent_id] = conn
+        else:
+            # 기존 에이전트 — IP 정보만 업데이트 (빈 값으로 덮어쓰지 않음)
             if ip_private:
                 conn.ip_private = ip_private
             if ip_public:
                 conn.ip_public = ip_public
             if ws_port:
                 conn.ws_port = ws_port
-            # 릴레이 모드이고 직접 IP가 있으면 → P2P 업그레이드 시도
+
+        # 이미 연결됨 → P2P 업그레이드만 시도
+        if conn.mode != ConnectionMode.DISCONNECTED:
             if (conn.mode == ConnectionMode.RELAY
                     and not conn._upgrading
                     and (ip_private or ip_public)):
@@ -185,14 +201,12 @@ class AgentServer(QObject):
                     )
             return
 
-        conn = AgentConnection(
-            agent_id=agent_id,
-            ip_private=ip_private,
-            ip_public=ip_public,
-            ws_port=ws_port,
-        )
-        self._connections[agent_id] = conn
+        # DISCONNECTED + cascade 이미 진행 중 → IP만 업데이트하고 스킵
+        if conn._connecting:
+            logger.debug(f"[P2P] {agent_id} cascade 이미 진행 중 — IP 업데이트만")
+            return
 
+        # cascade 시작
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self._connect_cascade(agent_id), self._loop
@@ -210,13 +224,13 @@ class AgentServer(QObject):
         """전체 연결 매니저 종료"""
         self._stop_event.set()
 
-        # 모든 에이전트 연결 해제
+        # 모든 에이전트 연결 해제 (UDP 채널 포함)
         if self._loop and self._loop.is_running():
             for agent_id in list(self._connections.keys()):
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self._close_connection(agent_id), self._loop
-                    )
+                    ).result(timeout=3)
                 except Exception:
                     pass
 
@@ -484,7 +498,7 @@ class AgentServer(QObject):
                 pass
 
     async def _connect_cascade(self, agent_id: str):
-        """LAN → WAN → UDP홀펀칭 → 릴레이 순서로 연결 시도"""
+        """WAN → UDP홀펀칭 → 릴레이 순서로 연결 시도"""
         conn = self._connections.get(agent_id)
         if not conn:
             return
@@ -494,34 +508,12 @@ class AgentServer(QObject):
             return
 
         conn._connecting = True
-        logger.info(f"[P2P] {agent_id} 연결 시도 시작 (LAN={conn.ip_private or 'N/A'}, "
+        logger.info(f"[P2P] {agent_id} 연결 시도 시작 ("
                      f"WAN={conn.ip_public or 'N/A'}, port={conn.ws_port})")
 
-        # 1단계: LAN (ip2) 직접 연결
-        if conn.ip_private:
-            logger.info(f"[P2P] {agent_id} 1단계 LAN 시도: {conn.ip_private}:{conn.ws_port}")
-            result = await self._try_p2p_connect(
-                f"ws://{conn.ip_private}:{conn.ws_port}",
-                timeout=self._timeout_lan,
-            )
-            if result:
-                ws, auth_info = result
-                conn.ws = ws
-                conn.mode = ConnectionMode.LAN
-                conn.info = auth_info
-                conn._connecting = False
-                logger.info(f"[P2P] {agent_id} LAN 연결 성공: {conn.ip_private}:{conn.ws_port}")
-                self.agent_connected.emit(agent_id, conn.ip_private)
-                self.connection_mode_changed.emit(agent_id, "lan")
-                conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
-                return
-            logger.info(f"[P2P] {agent_id} LAN 연결 실패")
-        else:
-            logger.info(f"[P2P] {agent_id} LAN 스킵 (사설IP 없음)")
-
-        # 2단계: WAN (ip1) 직접 연결
+        # 1단계: WAN (ip1) 직접 연결
         if conn.ip_public:
-            logger.info(f"[P2P] {agent_id} 2단계 WAN 시도: {conn.ip_public}:{conn.ws_port}")
+            logger.info(f"[P2P] {agent_id} 1단계 WAN 시도: {conn.ip_public}:{conn.ws_port}")
             result = await self._try_p2p_connect(
                 f"ws://{conn.ip_public}:{conn.ws_port}",
                 timeout=self._timeout_wan,
@@ -546,7 +538,7 @@ class AgentServer(QObject):
             conn._connecting = False
             return
 
-        # 3단계: UDP 홀펀칭 P2P (포트포워딩 불필요)
+        # 2단계: UDP 홀펀칭 P2P (포트포워딩 불필요)
         if self._relay_ws:
             udp_ch = await self._try_udp_punch(agent_id)
             if udp_ch:
@@ -554,12 +546,13 @@ class AgentServer(QObject):
                 conn.mode = ConnectionMode.UDP_P2P
                 conn._connecting = False
                 logger.info(f"[P2P] {agent_id} ★ UDP 홀펀칭 P2P 연결 성공!")
-                self.agent_connected.emit(agent_id, conn.ip_public or "udp_p2p")
-                self.connection_mode_changed.emit(agent_id, "udp_p2p")
+                # 시그널 전에 recv/ping 루프 시작 (즉시 수신 가능하게)
                 udp_ch.start(
                     on_control=lambda msg, aid=agent_id: self._on_udp_control(aid, msg),
                     on_video=lambda t, d, aid=agent_id: self._on_udp_video(aid, t, d),
                 )
+                self.agent_connected.emit(agent_id, conn.ip_public or "udp_p2p")
+                self.connection_mode_changed.emit(agent_id, "udp_p2p")
                 return
 
         # 릴레이 핸들러가 이미 연결했으면 스킵
@@ -567,7 +560,7 @@ class AgentServer(QObject):
             conn._connecting = False
             return
 
-        # 4단계: 서버 릴레이 폴백
+        # 3단계: 서버 릴레이 폴백
         if self._relay_ws:
             conn.ws = self._relay_ws
             conn.mode = ConnectionMode.RELAY
@@ -580,7 +573,7 @@ class AgentServer(QObject):
         # 전부 실패
         conn.mode = ConnectionMode.DISCONNECTED
         conn._connecting = False
-        logger.warning(f"[P2P] {agent_id} 연결 실패 (LAN/WAN/릴레이)")
+        logger.warning(f"[P2P] {agent_id} 연결 실패 (WAN/UDP/릴레이)")
 
     # P2P 업그레이드 실패 후 재시도 대기 시간 (초)
     _UPGRADE_COOLDOWN = 120
@@ -601,23 +594,7 @@ class AgentServer(QObject):
 
         conn._upgrading = True
         try:
-            # 1단계: LAN 시도
-            if conn.ip_private:
-                result = await self._try_p2p_connect(
-                    f"ws://{conn.ip_private}:{conn.ws_port}",
-                    timeout=self._timeout_lan,
-                )
-                if result:
-                    ws, auth_info = result
-                    conn.ws = ws
-                    conn.mode = ConnectionMode.LAN
-                    conn.info = auth_info
-                    logger.info(f"[P2P] {agent_id} 릴레이→LAN 업그레이드: {conn.ip_private}:{conn.ws_port}")
-                    self.connection_mode_changed.emit(agent_id, "lan")
-                    conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
-                    return
-
-            # 2단계: WAN 시도
+            # 1단계: WAN 시도
             if conn.ip_public:
                 result = await self._try_p2p_connect(
                     f"ws://{conn.ip_public}:{conn.ws_port}",
@@ -633,18 +610,19 @@ class AgentServer(QObject):
                     conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
                     return
 
-            # 3단계: UDP 홀펀칭 시도
+            # 2단계: UDP 홀펀칭 시도
             if self._relay_ws:
                 udp_ch = await self._try_udp_punch(agent_id)
                 if udp_ch:
                     conn.udp_channel = udp_ch
                     conn.mode = ConnectionMode.UDP_P2P
                     logger.info(f"[P2P] {agent_id} 릴레이→UDP P2P 업그레이드 성공!")
-                    self.connection_mode_changed.emit(agent_id, "udp_p2p")
+                    # 시그널 전에 recv/ping 루프 시작
                     udp_ch.start(
                         on_control=lambda msg, aid=agent_id: self._on_udp_control(aid, msg),
                         on_video=lambda t, d, aid=agent_id: self._on_udp_video(aid, t, d),
                     )
+                    self.connection_mode_changed.emit(agent_id, "udp_p2p")
                     # 에이전트에 thumbnail push 재시작 (UDP 채널 경유)
                     self._send_to_agent(agent_id, {
                         'type': 'stop_thumbnail_push'
@@ -657,8 +635,7 @@ class AgentServer(QObject):
             # P2P 실패 — 릴레이 유지, 쿨다운 시작
             conn._last_upgrade_fail = _time.time()
             logger.info(f"[P2P] {agent_id} P2P 업그레이드 실패 — {self._UPGRADE_COOLDOWN}초 쿨다운 "
-                         f"(LAN={conn.ip_private or 'N/A'}, "
-                         f"WAN={conn.ip_public or 'N/A'}:{conn.ws_port})")
+                         f"(WAN={conn.ip_public or 'N/A'}:{conn.ws_port})")
         finally:
             conn._upgrading = False
 

@@ -1383,6 +1383,7 @@ class WellcomAgent:
         """UDP 채널에서 수신한 매니저의 제어 메시지 처리"""
         adapter = self._udp_adapter
         if not adapter:
+            logger.warning("[UDP] 제어 메시지 수신 — adapter 없음, 무시")
             return
         # 기존 _handle_text 재활용 (JSON string으로 변환 후 전달)
         try:
@@ -1391,7 +1392,7 @@ class WellcomAgent:
                 self._handle_text(adapter, raw, 'udp_p2p')
             )
         except Exception as e:
-            logger.debug(f"[UDP] 제어 메시지 처리 오류: {e}")
+            logger.warning(f"[UDP] 제어 메시지 처리 오류: {e}")
 
     async def _handle_binary(self, websocket, data: bytes, manager_id: str):
         """바이너리 프레임 처리 (파일 청크)"""
@@ -1418,6 +1419,7 @@ class WellcomAgent:
         """썸네일 push 모드 — 주기적으로 자동 전송"""
         interval = max(0.2, min(interval, 5.0))
         logger.info(f"[{manager_id}] 썸네일 push 시작: {interval}초")
+        consecutive_errors = 0
 
         try:
             while self._running:
@@ -1427,10 +1429,17 @@ class WellcomAgent:
                         quality=self.config.thumbnail_quality,
                     )
                     await websocket.send(bytes([HEADER_THUMBNAIL]) + jpeg_data)
+                    consecutive_errors = 0
                 except websockets.exceptions.ConnectionClosed:
+                    logger.info(f"[{manager_id}] 썸네일 push: WS 연결 종료")
                     break
                 except Exception as e:
-                    logger.debug(f"push 썸네일 전송 실패: {e}")
+                    consecutive_errors += 1
+                    if consecutive_errors <= 3:
+                        logger.debug(f"[{manager_id}] push 썸네일 전송 실패: {e}")
+                    if consecutive_errors >= 10:
+                        logger.warning(f"[{manager_id}] push 썸네일 연속 실패 10회 — 중단")
+                        break
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass
