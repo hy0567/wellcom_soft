@@ -487,6 +487,31 @@ def _get_mac_address() -> str:
         return ''
 
 
+class _UdpSendAdapter:
+    """UdpChannel을 websocket.send() 인터페이스로 래핑.
+
+    기존 스트리밍/제어 코드가 `await websocket.send(data)`를 사용하므로
+    UDP 채널도 동일 인터페이스로 투명하게 사용 가능.
+    """
+
+    def __init__(self, udp_channel):
+        self._ch = udp_channel
+
+    async def send(self, data):
+        if isinstance(data, str):
+            # JSON 텍스트 → 제어 메시지
+            msg = json.loads(data)
+            await self._ch.send_control(msg)
+        elif isinstance(data, bytes):
+            if len(data) < 1:
+                return
+            # [1B header] + [payload] → send_video
+            self._ch.send_video(data[0], data[1:])
+
+    async def close(self):
+        await self._ch.close()
+
+
 class WellcomAgent:
     """트레이 아이콘 + 서버 등록 + WS 서버(P2P) + 화면 캡처 + 입력 주입
 
@@ -528,6 +553,10 @@ class WellcomAgent:
         self._thumbnail_tasks: Dict[str, asyncio.Task] = {}
         self._stream_settings: Dict[str, dict] = {}  # manager_id → {fps, quality}
         self._h264_encoders: Dict[str, object] = {}  # manager_id → H264Encoder
+
+        # UDP P2P (NAT 홀펀칭)
+        self._udp_channel = None       # UdpChannel 인스턴스
+        self._udp_adapter = None       # _UdpSendAdapter (websocket.send 호환)
 
     def _get_system_info(self) -> dict:
         """시스템 정보 수집"""
@@ -1218,6 +1247,10 @@ class WellcomAgent:
                 daemon=True, name='UpdateWorker'
             ).start()
 
+        elif msg_type == 'udp_offer':
+            # 매니저의 UDP 홀펀칭 요청 → 비동기 처리
+            asyncio.ensure_future(self._handle_udp_offer(websocket, msg))
+
     def _run_remote_update(self, ws):
         """원격 업데이트 실행 (백그라운드 스레드 — 매니저에 진행상황 전송)"""
         def send_status(status: str, **kwargs):
@@ -1267,6 +1300,98 @@ class WellcomAgent:
         except Exception as e:
             logger.error(f"원격 업데이트 실패: {e}")
             send_status('failed', error=str(e))
+
+    async def _handle_udp_offer(self, relay_ws, msg: dict):
+        """매니저의 UDP 홀펀칭 요청 처리.
+
+        1. UDP 소켓 생성 + STUN 탐지
+        2. udp_answer 응답 (릴레이 경유)
+        3. 홀펀칭 실행
+        4. 성공 시 UDP 채널 저장 + 어댑터 설정
+        """
+        punch_token_hex = msg.get('punch_token', '')
+        peer_ip = msg.get('udp_ip', '')
+        peer_port = msg.get('udp_port', 0)
+
+        if not punch_token_hex or not peer_ip or not peer_port:
+            logger.warning("[UDP-Punch] 잘못된 udp_offer")
+            return
+
+        try:
+            # core 모듈 경로 추가 (개발 모드: agent/ 상위의 core/)
+            agent_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(agent_dir)
+            import sys as _sys
+            for p in [agent_dir, parent_dir]:
+                if p not in _sys.path:
+                    _sys.path.insert(0, p)
+
+            from core.stun_client import stun_discover
+            from core.udp_punch import punch_as_agent, _create_udp_socket
+            from core.udp_channel import UdpChannel
+
+            # 1. UDP 소켓 생성 + STUN 탐지
+            sock = _create_udp_socket()
+            local_port = sock.getsockname()[1]
+            logger.info(f"[UDP-Punch] STUN 탐지 시작 (로컬 포트: {local_port})")
+
+            stun_result = await stun_discover(sock, timeout=3.0)
+            if not stun_result:
+                logger.warning("[UDP-Punch] STUN 탐지 실패")
+                sock.close()
+                return
+
+            my_ip, my_port = stun_result
+            logger.info(f"[UDP-Punch] 내 공인 엔드포인트: {my_ip}:{my_port}")
+
+            # 2. udp_answer 응답 (릴레이 경유)
+            answer = json.dumps({
+                'type': 'udp_answer',
+                'source_agent': self._agent_id,
+                'udp_ip': my_ip,
+                'udp_port': my_port,
+                'punch_token': punch_token_hex,
+            })
+            await relay_ws.send(answer)
+            logger.info(f"[UDP-Punch] udp_answer 전송 ({my_ip}:{my_port})")
+
+            # 3. 홀펀칭 실행
+            punch_token = bytes.fromhex(punch_token_hex)
+            channel = await punch_as_agent(sock, peer_ip, peer_port, punch_token)
+
+            if channel:
+                # 4. UDP 채널 활성화
+                self._udp_channel = channel
+                adapter = _UdpSendAdapter(channel)
+                self._udp_adapter = adapter
+
+                logger.info(f"[UDP-Punch] ★ 홀펀칭 성공! 매니저 ({peer_ip}:{peer_port})")
+
+                # UDP 수신 루프 시작 (매니저→에이전트 제어 메시지)
+                channel.start(
+                    on_control=lambda m: self._on_udp_control_msg(m),
+                    on_video=None,  # 에이전트는 비디오 수신 안함
+                )
+            else:
+                logger.info("[UDP-Punch] 홀펀칭 실패 — 릴레이 유지")
+                sock.close()
+
+        except Exception as e:
+            logger.warning(f"[UDP-Punch] 처리 오류: {e}")
+
+    def _on_udp_control_msg(self, msg: dict):
+        """UDP 채널에서 수신한 매니저의 제어 메시지 처리"""
+        adapter = self._udp_adapter
+        if not adapter:
+            return
+        # 기존 _handle_text 재활용 (JSON string으로 변환 후 전달)
+        try:
+            raw = json.dumps(msg)
+            asyncio.ensure_future(
+                self._handle_text(adapter, raw, 'udp_p2p')
+            )
+        except Exception as e:
+            logger.debug(f"[UDP] 제어 메시지 처리 오류: {e}")
 
     async def _handle_binary(self, websocket, data: bytes, manager_id: str):
         """바이너리 프레임 처리 (파일 청크)"""

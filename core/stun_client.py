@@ -1,0 +1,172 @@
+"""STUN 클라이언트 — NAT 공인 UDP 엔드포인트 탐지 (RFC 5389)
+
+UDP 소켓의 NAT 매핑된 공인 IP:PORT를 STUN 서버에 질의하여 반환.
+NAT 홀펀칭의 첫 단계로, 양쪽의 공인 엔드포인트를 알아내야 시그널링 가능.
+"""
+
+import asyncio
+import os
+import struct
+import socket
+import logging
+
+logger = logging.getLogger(__name__)
+
+# STUN 상수
+STUN_MAGIC_COOKIE = 0x2112A442
+STUN_BINDING_REQUEST = 0x0001
+STUN_BINDING_RESPONSE = 0x0101
+ATTR_MAPPED_ADDRESS = 0x0001
+ATTR_XOR_MAPPED_ADDRESS = 0x0020
+
+# 공용 STUN 서버 목록
+STUN_SERVERS = [
+    ('stun.l.google.com', 19302),
+    ('stun1.l.google.com', 19302),
+    ('stun2.l.google.com', 19302),
+    ('stun.cloudflare.com', 3478),
+    ('stun.stunprotocol.org', 3478),
+]
+
+
+def _build_binding_request() -> tuple[bytes, bytes]:
+    """STUN Binding Request 패킷 생성.
+
+    Returns:
+        (packet, transaction_id)
+    """
+    txn_id = os.urandom(12)
+    # Header: type(2) + length(2) + magic(4) + txn_id(12) = 20 bytes
+    header = struct.pack('!HHI', STUN_BINDING_REQUEST, 0, STUN_MAGIC_COOKIE) + txn_id
+    return header, txn_id
+
+
+def _parse_binding_response(data: bytes, txn_id: bytes) -> tuple[str, int] | None:
+    """STUN Binding Response에서 공인 IP:PORT 추출.
+
+    Returns:
+        (ip, port) 또는 None
+    """
+    if len(data) < 20:
+        return None
+
+    msg_type, msg_len, magic = struct.unpack_from('!HHI', data, 0)
+    resp_txn = data[8:20]
+
+    if msg_type != STUN_BINDING_RESPONSE:
+        return None
+    if magic != STUN_MAGIC_COOKIE:
+        return None
+    if resp_txn != txn_id:
+        return None
+
+    # 속성 파싱
+    offset = 20
+    while offset + 4 <= len(data):
+        attr_type, attr_len = struct.unpack_from('!HH', data, offset)
+        offset += 4
+        if offset + attr_len > len(data):
+            break
+
+        if attr_type == ATTR_XOR_MAPPED_ADDRESS:
+            result = _parse_xor_mapped(data[offset:offset + attr_len], txn_id)
+            if result:
+                return result
+        elif attr_type == ATTR_MAPPED_ADDRESS:
+            result = _parse_mapped(data[offset:offset + attr_len])
+            if result:
+                return result
+
+        # 4바이트 정렬
+        offset += attr_len
+        if attr_len % 4:
+            offset += 4 - (attr_len % 4)
+
+    return None
+
+
+def _parse_xor_mapped(attr_data: bytes, txn_id: bytes) -> tuple[str, int] | None:
+    """XOR-MAPPED-ADDRESS 속성 파싱"""
+    if len(attr_data) < 8:
+        return None
+
+    family = attr_data[1]
+    xor_port = struct.unpack_from('!H', attr_data, 2)[0]
+    port = xor_port ^ (STUN_MAGIC_COOKIE >> 16)
+
+    if family == 0x01:  # IPv4
+        xor_ip = struct.unpack_from('!I', attr_data, 4)[0]
+        ip_int = xor_ip ^ STUN_MAGIC_COOKIE
+        ip = socket.inet_ntoa(struct.pack('!I', ip_int))
+        return ip, port
+
+    return None
+
+
+def _parse_mapped(attr_data: bytes) -> tuple[str, int] | None:
+    """MAPPED-ADDRESS 속성 파싱 (폴백)"""
+    if len(attr_data) < 8:
+        return None
+
+    family = attr_data[1]
+    port = struct.unpack_from('!H', attr_data, 2)[0]
+
+    if family == 0x01:  # IPv4
+        ip = socket.inet_ntoa(attr_data[4:8])
+        return ip, port
+
+    return None
+
+
+async def stun_discover(sock: socket.socket,
+                        timeout: float = 3.0,
+                        servers: list | None = None) -> tuple[str, int] | None:
+    """UDP 소켓의 NAT 매핑된 공인 IP:PORT 탐지.
+
+    Args:
+        sock: 바인딩된 UDP 소켓 (non-blocking)
+        timeout: STUN 응답 대기 시간
+        servers: STUN 서버 목록 [(host, port), ...]
+
+    Returns:
+        (공인IP, 공인PORT) 또는 None
+    """
+    if servers is None:
+        servers = STUN_SERVERS
+
+    loop = asyncio.get_event_loop()
+    packet, txn_id = _build_binding_request()
+
+    for host, port in servers:
+        try:
+            # DNS 해석
+            addr_info = await loop.getaddrinfo(host, port, family=socket.AF_INET,
+                                                type=socket.SOCK_DGRAM)
+            if not addr_info:
+                continue
+            server_addr = addr_info[0][4]
+
+            # Binding Request 전송
+            sock.sendto(packet, server_addr)
+
+            # 응답 대기
+            try:
+                data = await asyncio.wait_for(
+                    loop.sock_recv(sock, 1024),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.debug(f"[STUN] {host}:{port} 타임아웃")
+                continue
+
+            result = _parse_binding_response(data, txn_id)
+            if result:
+                logger.info(f"[STUN] 공인 엔드포인트: {result[0]}:{result[1]} (via {host})")
+                return result
+
+        except Exception as e:
+            logger.debug(f"[STUN] {host}:{port} 오류: {e}")
+            continue
+
+    logger.warning("[STUN] 모든 STUN 서버 실패")
+    return None

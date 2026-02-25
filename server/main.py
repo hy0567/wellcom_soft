@@ -85,12 +85,12 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    # 에이전트 hello 핸드셰이크
+    # 에이전트 핸드셰이크 (auth 또는 agent_hello 모두 수용)
     agent_id = None
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         init = json.loads(raw)
-        if init.get("type") == "agent_hello":
+        if init.get("type") in ("auth", "agent_hello"):
             agent_id = str(init.get("agent_id", "")).strip()
     except Exception:
         pass
