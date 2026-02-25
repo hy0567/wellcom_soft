@@ -32,6 +32,11 @@ a = Analysis(
         (str(project_path / 'agent' / 'file_receiver.py'), 'app'),
         (str(project_path / 'agent' / 'version.py'), 'app'),
         (str(project_path / 'agent' / 'h264_encoder.py'), 'app'),
+        # core 모듈 (UDP P2P 홀펀칭용)
+        (str(project_path / 'core' / '__init__.py'), 'app/core'),
+        (str(project_path / 'core' / 'stun_client.py'), 'app/core'),
+        (str(project_path / 'core' / 'udp_punch.py'), 'app/core'),
+        (str(project_path / 'core' / 'udp_channel.py'), 'app/core'),
         # updater 모듈 (자동 업데이트용)
         (str(project_path / 'updater' / '__init__.py'), 'app/updater'),
         (str(project_path / 'updater' / 'github_client.py'), 'app/updater'),

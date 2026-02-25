@@ -280,7 +280,7 @@ def main():
     if not check_for_updates(app):
         return
 
-    # v3.0.0: P2P 연결 매니저 시작 (LAN→WAN 직접 연결, 서버 릴레이 폴백)
+    # v3.0.0: P2P 연결 매니저 시작 (WAN→UDP홀펀칭→서버 릴레이 폴백)
     from core.agent_server import AgentServer
     from api_client import api_client as _api
     agent_server = AgentServer()
@@ -292,7 +292,7 @@ def main():
     logger.info(f"JWT 토큰: {_token[:20]}..." if len(_token) > 20 else f"JWT 토큰: {_token}")
     logger.info(f"로그인 사용자: {_api.username} (ID: {_api.user_id})")
     agent_server.start_connection(_server_url, _token)
-    logger.info("P2P 연결 매니저 시작 (LAN→WAN→릴레이 폴백)")
+    logger.info("P2P 연결 매니저 시작 (WAN→UDP홀펀칭→릴레이 폴백)")
 
     # PC 매니저 초기화
     from core.pc_manager import PCManager

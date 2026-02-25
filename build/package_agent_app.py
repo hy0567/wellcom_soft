@@ -31,6 +31,11 @@ AGENT_APP_FILES = [
     'agent/file_receiver.py',
     'agent/version.py',
     'agent/h264_encoder.py',
+    # core 모듈 (UDP P2P 홀펀칭용)
+    'core/__init__.py',
+    'core/stun_client.py',
+    'core/udp_punch.py',
+    'core/udp_channel.py',
     # updater 모듈 (에이전트 자동 업데이트용)
     'updater/__init__.py',
     'updater/github_client.py',
