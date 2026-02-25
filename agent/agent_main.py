@@ -675,15 +675,15 @@ class WellcomAgent:
                     ping_interval=20,
                     ping_timeout=20,
                 ) as ws:
-                    # 핸드셰이크
+                    # 핸드셰이크 — 배포 서버 프로토콜: type='auth'
                     await ws.send(json.dumps({
-                        'type': 'agent_hello',
+                        'type': 'auth',
                         'agent_id': self._agent_id,
                         'ws_port': self._ws_port,
                     }))
                     raw = await asyncio.wait_for(ws.recv(), timeout=10)
                     resp = json.loads(raw)
-                    if resp.get('type') != 'relay_ok':
+                    if resp.get('type') not in ('auth_ok', 'relay_ok'):
                         logger.warning(f"[Relay] 핸드셰이크 실패: {resp}")
                         break
 
