@@ -227,14 +227,15 @@ class H264Encoder:
         self._quality = quality
         logger.info(f"[H264Encoder] 화질 변경: {quality}")
 
-        # 인코더 재초기화
+        # 인코더 재초기화 (실패 시 기존 컨텍스트 유지)
         try:
+            new_ctx = self._create_encoder(self._encoder_name)
             old_ctx = self._codec_ctx
-            self._codec_ctx = self._create_encoder(self._encoder_name)
+            self._codec_ctx = new_ctx
             if old_ctx:
                 old_ctx.close()
         except Exception as e:
-            logger.error(f"[H264Encoder] 화질 변경 실패: {e}")
+            logger.error(f"[H264Encoder] 화질 변경 실패 (기존 설정 유지): {e}")
 
     def update_fps(self, fps: int):
         """FPS 변경 (인코더 재초기화)"""
@@ -246,12 +247,13 @@ class H264Encoder:
         logger.info(f"[H264Encoder] FPS 변경: {fps}")
 
         try:
+            new_ctx = self._create_encoder(self._encoder_name)
             old_ctx = self._codec_ctx
-            self._codec_ctx = self._create_encoder(self._encoder_name)
+            self._codec_ctx = new_ctx
             if old_ctx:
                 old_ctx.close()
         except Exception as e:
-            logger.error(f"[H264Encoder] FPS 변경 실패: {e}")
+            logger.error(f"[H264Encoder] FPS 변경 실패 (기존 설정 유지): {e}")
 
     def close(self):
         """인코더 리소스 해제"""

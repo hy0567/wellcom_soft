@@ -1550,7 +1550,8 @@ class WellcomAgent:
                 else:
                     # MJPEG 경로 (기존)
                     jpeg_data = self.screen_capture.capture_jpeg(quality=cur_quality)
-                    await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                    if jpeg_data:
+                        await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
 
                 await asyncio.sleep(cur_interval)
         except asyncio.CancelledError:

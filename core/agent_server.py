@@ -381,8 +381,11 @@ class AgentServer(QObject):
         if not conn.ws:
             return
 
+        # 릴레이 모드: ws가 닫혔으면 전송 스킵
         if conn.mode == ConnectionMode.RELAY:
-            # 릴레이: target_agent 추가 (기존 서버 릴레이 방식)
+            if not self._relay_ws or conn.ws != self._relay_ws:
+                logger.debug(f"[P2P] {agent_id} 릴레이 WS 만료 — 전송 스킵")
+                return
             msg_dict['target_agent'] = agent_id
 
         msg = json.dumps(msg_dict)
@@ -574,6 +577,7 @@ class AgentServer(QObject):
         conn.mode = ConnectionMode.DISCONNECTED
         conn._connecting = False
         logger.warning(f"[P2P] {agent_id} 연결 실패 (WAN/UDP/릴레이)")
+        self.agent_disconnected.emit(agent_id)
 
     # P2P 업그레이드 실패 후 재시도 대기 시간 (초)
     _UPGRADE_COOLDOWN = 120

@@ -141,6 +141,7 @@ class H264Decoder:
             if is_keyframe:
                 logger.info(f"[H264Decoder] 키프레임 수신 (seq={frame_seq}) — 디코딩 복귀")
                 self._waiting_for_keyframe = False
+                self._decode_errors = 0
                 # 디코더 리셋 후 키프레임부터 새로 시작
                 self._reset_decoder_context()
             else:
