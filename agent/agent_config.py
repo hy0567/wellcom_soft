@@ -19,8 +19,8 @@ class AgentConfig:
         'clipboard_sync': True,
         'screen_quality': 80,       # JPEG/H.264 품질 (1-100)
         'screen_fps': 30,           # 스트리밍 FPS (LinkIO 수준)
-        'thumbnail_quality': 30,    # 썸네일 품질
-        'thumbnail_width': 320,     # 썸네일 최대 너비
+        'thumbnail_quality': 50,    # 썸네일 품질
+        'thumbnail_width': 480,     # 썸네일 최대 너비
         'heartbeat_interval': 30,   # 하트비트 간격 (초)
         'ws_port': 21350,            # WS 서버 리스닝 포트 (P2P)
         'ws_max_connections': 5,     # 최대 동시 매니저 연결 수
@@ -79,6 +79,13 @@ class AgentConfig:
         if self._data.get('screen_fps', 0) <= 15:
             self._data['screen_fps'] = 30
             changed = True
+        # v3.2.6 이전: thumbnail_quality=30, thumbnail_width=320 → 50, 480
+        if self._data.get('thumbnail_quality', 0) <= 30:
+            self._data['thumbnail_quality'] = 50
+            changed = True
+        if self._data.get('thumbnail_width', 0) <= 320:
+            self._data['thumbnail_width'] = 480
+            changed = True
         if changed:
             self._save()
 
@@ -129,11 +136,11 @@ class AgentConfig:
 
     @property
     def thumbnail_quality(self) -> int:
-        return self._data.get('thumbnail_quality', 30)
+        return self._data.get('thumbnail_quality', 50)
 
     @property
     def thumbnail_width(self) -> int:
-        return self._data.get('thumbnail_width', 320)
+        return self._data.get('thumbnail_width', 480)
 
     @property
     def api_url(self) -> str:

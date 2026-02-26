@@ -10,6 +10,7 @@ from typing import Dict
 from PyQt6.QtWidgets import (
     QScrollArea, QWidget, QGridLayout, QLabel, QVBoxLayout,
     QFrame, QSizePolicy, QHBoxLayout, QPushButton,
+    QGraphicsDropShadowEffect,
 )
 from PyQt6.QtCore import Qt, QTimer, QByteArray, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QColor, QPalette, QMouseEvent, QFont, QPainter
@@ -26,9 +27,25 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ── 카드 디자인 상수 ──────────────────────────────────────────
+_CARD_BG = '#252526'
+_CARD_BG_HOVER = '#2d2d30'
+_CARD_RADIUS = 8
+_CARD_BORDER = 2
+_IMG_BG = '#1a1a1c'
+_IMG_RADIUS = 4
+
+_COLOR_ONLINE = '#4CAF50'
+_COLOR_ERROR = '#f44336'
+_COLOR_OFFLINE = '#555'
+_COLOR_SELECTED = '#007acc'
+
+_SHADOW_NORMAL = (12, 2, 50)     # blur, offset_y, alpha
+_SHADOW_HOVER = (20, 4, 80)      # blur, offset_y, alpha
+
 
 class PCThumbnailWidget(QFrame):
-    """단일 PC 썸네일 위젯 (LinkIO 스타일)"""
+    """단일 PC 썸네일 위젯"""
 
     double_clicked = pyqtSignal(str)   # pc_name
     right_clicked = pyqtSignal(str, object)   # pc_name, QPoint (global pos)
@@ -41,70 +58,105 @@ class PCThumbnailWidget(QFrame):
         self._is_online = False
         self._is_selected = False
         self._status = PCStatus.OFFLINE
+        self._hover = False
 
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setMinimumSize(200, 150)
+        self.setMinimumSize(200, 160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(2)
+        # 드롭 섀도우
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(_SHADOW_NORMAL[0])
+        self._shadow.setOffset(0, _SHADOW_NORMAL[1])
+        self._shadow.setColor(QColor(0, 0, 0, _SHADOW_NORMAL[2]))
+        self.setGraphicsEffect(self._shadow)
 
-        # 썸네일 이미지
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setSpacing(6)
+
+        # ── 썸네일 이미지 ──
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumHeight(100)
-        self.image_label.setStyleSheet("background-color: #111; border-radius: 2px;")
+        self.image_label.setMinimumHeight(120)
+        self.image_label.setStyleSheet(
+            f"background-color: {_IMG_BG}; border-radius: {_IMG_RADIUS}px; color: #555;"
+        )
         self.image_label.setText("연결 대기...")
         self.image_label.setFont(QFont("", 9))
         layout.addWidget(self.image_label, 1)
 
-        # 하단: PC 이름 + 메모
-        bottom = QWidget()
-        bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(4, 2, 4, 2)
-        bottom_layout.setSpacing(4)
+        # ── 하단 Row 1: 상태 점 + PC이름 + 모드 배지 ──
+        row1 = QWidget()
+        row1.setStyleSheet("background: transparent;")
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(2, 0, 2, 0)
+        row1_layout.setSpacing(6)
+
+        self.status_dot = QLabel()
+        self.status_dot.setFixedSize(10, 10)
+        self.status_dot.setStyleSheet(
+            f"background-color: {_COLOR_OFFLINE}; border-radius: 5px;"
+        )
+        row1_layout.addWidget(self.status_dot)
 
         self.name_label = QLabel(pc_name)
-        self.name_label.setFont(QFont("", 10, QFont.Weight.Bold))
-        bottom_layout.addWidget(self.name_label)
+        self.name_label.setFont(QFont("", 11, QFont.Weight.Bold))
+        self.name_label.setStyleSheet("color: #e0e0e0; background: transparent;")
+        row1_layout.addWidget(self.name_label)
 
-        self.version_label = QLabel()
-        self.version_label.setFont(QFont("", 8))
-        self.version_label.setStyleSheet("color: #888;")
-        bottom_layout.addWidget(self.version_label)
+        row1_layout.addStretch()
 
-        # 연결 모드 배지 (LAN / WAN / 릴레이)
+        # 연결 모드 배지 (LAN / WAN / UDP / 릴레이)
         self.mode_label = QLabel()
         self.mode_label.setFont(QFont("", 8, QFont.Weight.Bold))
         self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mode_label.setFixedHeight(16)
-        self.mode_label.setContentsMargins(4, 0, 4, 0)
+        self.mode_label.setFixedHeight(20)
         self.mode_label.setVisible(False)
-        bottom_layout.addWidget(self.mode_label)
+        row1_layout.addWidget(self.mode_label)
+
+        layout.addWidget(row1)
+
+        # ── 하단 Row 2: 버전 + 업데이트 버튼 + 메모 ──
+        row2 = QWidget()
+        row2.setStyleSheet("background: transparent;")
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(18, 0, 2, 0)   # 18 = dot+spacing 인덴트
+        row2_layout.setSpacing(6)
+
+        self.version_label = QLabel()
+        self.version_label.setFont(QFont("", 8))
+        self.version_label.setStyleSheet("color: #888; background: transparent;")
+        row2_layout.addWidget(self.version_label)
 
         self.update_btn = QPushButton("업데이트")
-        self.update_btn.setFixedHeight(18)
+        self.update_btn.setFixedHeight(20)
         self.update_btn.setFont(QFont("", 8))
         self.update_btn.setStyleSheet(
             "QPushButton { background-color: #e67e22; color: white; border: none;"
-            " border-radius: 3px; padding: 0 6px; }"
+            " border-radius: 4px; padding: 2px 8px; }"
             "QPushButton:hover { background-color: #d35400; }"
         )
         self.update_btn.setVisible(False)
         self.update_btn.clicked.connect(lambda: self.update_requested.emit(self.pc_name))
-        bottom_layout.addWidget(self.update_btn)
+        row2_layout.addWidget(self.update_btn)
+
+        row2_layout.addStretch()
 
         self.memo_label = QLabel(memo)
         self.memo_label.setFont(QFont("", 8))
-        self.memo_label.setStyleSheet("color: #888;")
-        self.memo_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        bottom_layout.addWidget(self.memo_label)
+        self.memo_label.setStyleSheet("color: #666; background: transparent;")
+        self.memo_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        row2_layout.addWidget(self.memo_label)
 
-        layout.addWidget(bottom)
+        layout.addWidget(row2)
 
         self._update_style()
+
+    # ── 썸네일 갱신 ──────────────────────────────────────────
 
     def update_thumbnail(self, jpeg_data: bytes):
         pixmap = QPixmap()
@@ -116,6 +168,8 @@ class PCThumbnailWidget(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             )
             self.image_label.setPixmap(scaled)
+
+    # ── 상태 ─────────────────────────────────────────────────
 
     def set_status(self, status: PCStatus):
         self._status = status
@@ -135,15 +189,15 @@ class PCThumbnailWidget(QFrame):
     def set_memo(self, memo: str):
         self.memo_label.setText(memo)
 
+    # ── 버전 ─────────────────────────────────────────────────
+
     def update_version(self, agent_version: str, manager_version: str = ''):
-        """버전 배지 갱신 — 구버전이면 빨간 배지 + 업데이트 버튼, 최신이면 초록 배지"""
         if not agent_version:
             self.version_label.setText('')
-            self.version_label.setStyleSheet("color: #555;")
+            self.version_label.setStyleSheet("color: #555; background: transparent;")
             self.update_btn.setVisible(False)
             return
 
-        # '0.0.0'은 버전 미보고 에이전트 플레이스홀더
         display = 'v?' if agent_version == '0.0.0' else f'v{agent_version}'
         self.version_label.setText(display)
         needs_update = False
@@ -156,13 +210,14 @@ class PCThumbnailWidget(QFrame):
                 pass
 
         if needs_update:
-            self.version_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+            self.version_label.setStyleSheet(
+                "color: #e74c3c; font-weight: bold; background: transparent;"
+            )
         else:
-            self.version_label.setStyleSheet("color: #2ecc71;")
+            self.version_label.setStyleSheet("color: #2ecc71; background: transparent;")
         self.update_btn.setVisible(needs_update)
 
     def set_update_status(self, status: str, **kwargs):
-        """업데이트 진행 상태 표시"""
         if status == 'checking':
             self.update_btn.setText("확인 중...")
             self.update_btn.setEnabled(False)
@@ -171,75 +226,107 @@ class PCThumbnailWidget(QFrame):
             self.update_btn.setText(f"다운로드 {pct}%")
             self.update_btn.setEnabled(False)
         elif status == 'restarting':
-            ver = kwargs.get('version', '')
-            self.update_btn.setText(f"재시작...")
+            self.update_btn.setText("재시작...")
             self.update_btn.setEnabled(False)
         elif status == 'up_to_date':
             self.update_btn.setText("최신")
             self.update_btn.setEnabled(False)
             self.update_btn.setStyleSheet(
                 "QPushButton { background-color: #27ae60; color: white; border: none;"
-                " border-radius: 3px; padding: 0 6px; }"
+                " border-radius: 4px; padding: 2px 8px; }"
             )
         elif status == 'failed':
             self.update_btn.setText("실패")
             self.update_btn.setEnabled(True)
             self.update_btn.setStyleSheet(
                 "QPushButton { background-color: #e74c3c; color: white; border: none;"
-                " border-radius: 3px; padding: 0 6px; }"
+                " border-radius: 4px; padding: 2px 8px; }"
                 "QPushButton:hover { background-color: #c0392b; }"
             )
         else:
-            # 원래 상태로 복원
             self.update_btn.setText("업데이트")
             self.update_btn.setEnabled(True)
             self.update_btn.setStyleSheet(
                 "QPushButton { background-color: #e67e22; color: white; border: none;"
-                " border-radius: 3px; padding: 0 6px; }"
+                " border-radius: 4px; padding: 2px 8px; }"
                 "QPushButton:hover { background-color: #d35400; }"
             )
 
+    # ── 연결 모드 배지 ───────────────────────────────────────
+
     def update_mode(self, mode: str):
-        """연결 모드 배지 갱신 (lan / wan / udp_p2p / relay / '')"""
         MODE_STYLES = {
-            'lan':     ('LAN',   '#27ae60', '#fff'),   # 초록
-            'udp_p2p': ('UDP',   '#8e44ad', '#fff'),   # 보라 — NAT 홀펀칭 P2P
-            'wan':     ('WAN',   '#2980b9', '#fff'),   # 파랑
-            'relay':   ('릴레이', '#d35400', '#fff'),   # 주황
+            'lan':     ('LAN',    '#27ae60', '#fff'),
+            'udp_p2p': ('UDP',    '#8e44ad', '#fff'),
+            'wan':     ('WAN',    '#2980b9', '#fff'),
+            'relay':   ('릴레이', '#d35400', '#fff'),
         }
         if mode in MODE_STYLES:
             text, bg, fg = MODE_STYLES[mode]
             self.mode_label.setText(text)
             self.mode_label.setStyleSheet(
                 f"QLabel {{ background-color: {bg}; color: {fg};"
-                f" border-radius: 3px; padding: 0 4px; }}"
+                f" border-radius: 4px; padding: 2px 8px; }}"
             )
             self.mode_label.setVisible(True)
         else:
             self.mode_label.setVisible(False)
 
+    # ── 스타일 갱신 ──────────────────────────────────────────
+
     def _update_style(self):
-        """연결 상태 + 선택 상태에 따라 테두리 색상 변경"""
-        if self._is_selected:
-            border_color = '#007acc'
-            border_width = 3
-        elif self._status == PCStatus.ONLINE:
-            border_color = '#4CAF50'
-            border_width = 2
+        """연결 상태 + 선택 + 호버에 따라 카드 스타일 변경"""
+        # 상태 점 색상
+        if self._status == PCStatus.ONLINE:
+            dot_color = _COLOR_ONLINE
         elif self._status == PCStatus.ERROR:
-            border_color = '#f44336'
-            border_width = 2
+            dot_color = _COLOR_ERROR
+        else:
+            dot_color = _COLOR_OFFLINE
+        self.status_dot.setStyleSheet(
+            f"background-color: {dot_color}; border-radius: 5px;"
+        )
+
+        # 카드 테두리 (일관된 2px — 레이아웃 시프트 없음)
+        if self._is_selected:
+            border_color = _COLOR_SELECTED
+        elif self._status == PCStatus.ONLINE:
+            border_color = _COLOR_ONLINE
+        elif self._status == PCStatus.ERROR:
+            border_color = _COLOR_ERROR
         else:
             border_color = '#3e3e3e'
-            border_width = 1
+
+        bg = _CARD_BG_HOVER if self._hover else _CARD_BG
 
         self.setStyleSheet(f"""
             PCThumbnailWidget {{
-                background-color: #1e1e1e;
-                border: {border_width}px solid {border_color};
-                border-radius: 4px;
+                background-color: {bg};
+                border: {_CARD_BORDER}px solid {border_color};
+                border-radius: {_CARD_RADIUS}px;
             }}
         """)
+
+        # 섀도우 강도
+        if self._hover:
+            blur, offset, alpha = _SHADOW_HOVER
+        else:
+            blur, offset, alpha = _SHADOW_NORMAL
+        self._shadow.setBlurRadius(blur)
+        self._shadow.setOffset(0, offset)
+        self._shadow.setColor(QColor(0, 0, 0, alpha))
+
+    # ── 마우스 이벤트 ────────────────────────────────────────
+
+    def enterEvent(self, event):
+        self._hover = True
+        self._update_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self._update_style()
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         self.double_clicked.emit(self.pc_name)
@@ -247,7 +334,6 @@ class PCThumbnailWidget(QFrame):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Ctrl+클릭 = 선택 토글
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self._is_selected = not self._is_selected
                 self._update_style()
@@ -259,7 +345,6 @@ class PCThumbnailWidget(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 리사이즈 시 썸네일 다시 스케일링 (마지막 pixmap이 있으면)
         pm = self.image_label.pixmap()
         if pm and not pm.isNull():
             self.image_label.setPixmap(pm.scaled(
@@ -275,20 +360,20 @@ class PlaceholderSlotWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setMinimumSize(200, 150)
+        self.setMinimumSize(200, 160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet("""
-            PlaceholderSlotWidget {
+        self.setStyleSheet(f"""
+            PlaceholderSlotWidget {{
                 background-color: #1e1e1e;
-                border: 2px dashed #2a2a2a;
-                border-radius: 6px;
-            }
+                border: 2px dashed #383838;
+                border-radius: {_CARD_RADIUS}px;
+            }}
         """)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl = QLabel("＋")
+        lbl = QLabel("+")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet("color: #2a2a2a; font-size: 32px; background: transparent;")
+        lbl.setStyleSheet("color: #444; font-size: 28px; background: transparent;")
         layout.addWidget(lbl)
 
 
@@ -311,13 +396,13 @@ class GridView(QScrollArea):
         # 스크롤 영역 설정
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setStyleSheet("background-color: #1a1a1a;")
+        self.setStyleSheet("QScrollArea { background-color: #1a1a1a; border: none; }")
 
         self._container = QWidget()
         self._container.setStyleSheet("background-color: #1a1a1a;")
         self._grid = QGridLayout(self._container)
-        self._grid.setSpacing(6)
-        self._grid.setContentsMargins(6, 6, 6, 6)
+        self._grid.setSpacing(12)
+        self._grid.setContentsMargins(12, 12, 12, 12)
         self.setWidget(self._container)
 
         # 시그널 연결
@@ -345,7 +430,6 @@ class GridView(QScrollArea):
             widget.deleteLater()
         self._thumbnails.clear()
 
-        # 플레이스홀더 정리
         for ph in self._placeholders:
             self._grid.removeWidget(ph)
             ph.deleteLater()
@@ -368,7 +452,6 @@ class GridView(QScrollArea):
             thumb.update_requested.connect(self._on_update_requested)
 
             agent_version = getattr(pc.info, 'agent_version', '')
-            # 온라인이지만 버전 미보고 에이전트 → 구버전으로 간주
             if not agent_version and pc.is_online:
                 agent_version = '0.0.0'
             thumb.update_version(agent_version, MANAGER_VERSION)
@@ -386,7 +469,6 @@ class GridView(QScrollArea):
             self._thumbnails[pc.name] = thumb
 
         # 마지막 행 빈 슬롯을 플레이스홀더로 채우기
-        # 에이전트가 0개이면 columns 개, 아니면 마지막 행의 나머지 칸 수만큼
         remainder = count % columns
         ph_count = (columns - remainder) % columns if count > 0 else columns
         for j in range(ph_count):
@@ -430,7 +512,6 @@ class GridView(QScrollArea):
 
     def _on_agent_disconnected(self, agent_id: str):
         self._push_agents.discard(agent_id)
-        # 연결 해제 시 모드 배지 숨김
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
         if pc:
             thumb = self._thumbnails.get(pc.name)
@@ -438,7 +519,6 @@ class GridView(QScrollArea):
                 thumb.update_mode('')
 
     def _on_connection_mode_changed(self, agent_id: str, mode: str):
-        """연결 모드 변경 시 배지 갱신 (lan / wan / relay)"""
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
         if pc:
             thumb = self._thumbnails.get(pc.name)
@@ -459,18 +539,15 @@ class GridView(QScrollArea):
         self.selection_changed.emit(list(self._selected_pcs))
 
     def _on_update_requested(self, pc_name: str):
-        """에이전트 원격 업데이트 요청"""
         pc = self.pc_manager.get_pc(pc_name)
         if pc:
             logger.info(f"[업데이트] {pc_name} ({pc.agent_id}) 원격 업데이트 요청")
-            # 버튼 즉시 피드백
             thumb = self._thumbnails.get(pc_name)
             if thumb:
                 thumb.set_update_status('checking')
             self.agent_server.send_update_request(pc.agent_id)
 
     def _on_update_status(self, agent_id: str, status_dict: dict):
-        """에이전트 업데이트 상태 수신"""
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
         if not pc:
             return
@@ -484,7 +561,6 @@ class GridView(QScrollArea):
         })
 
     def get_selected_agent_ids(self) -> list:
-        """선택된 PC들의 agent_id 목록"""
         result = []
         for pc_name in self._selected_pcs:
             pc = self.pc_manager.get_pc(pc_name)
@@ -493,14 +569,12 @@ class GridView(QScrollArea):
         return result
 
     def select_all(self):
-        """전체 선택"""
         for name, thumb in self._thumbnails.items():
             self._selected_pcs.add(name)
             thumb.set_selected(True)
         self.selection_changed.emit(list(self._selected_pcs))
 
     def deselect_all(self):
-        """전체 해제"""
         for thumb in self._thumbnails.values():
             thumb.set_selected(False)
         self._selected_pcs.clear()
