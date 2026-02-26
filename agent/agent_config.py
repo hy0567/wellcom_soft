@@ -17,8 +17,8 @@ class AgentConfig:
         'save_dir': '',
         'auto_start': True,
         'clipboard_sync': True,
-        'screen_quality': 60,       # JPEG 품질 (1-100)
-        'screen_fps': 15,           # 스트리밍 FPS
+        'screen_quality': 80,       # JPEG/H.264 품질 (1-100)
+        'screen_fps': 30,           # 스트리밍 FPS (LinkIO 수준)
         'thumbnail_quality': 30,    # 썸네일 품질
         'thumbnail_width': 320,     # 썸네일 최대 너비
         'heartbeat_interval': 30,   # 하트비트 간격 (초)
@@ -36,6 +36,7 @@ class AgentConfig:
         self._data = dict(self.DEFAULT)
         self._load_portable()
         self._load()
+        self._migrate()
 
         if not self._data['save_dir']:
             self._data['save_dir'] = str(
@@ -67,6 +68,19 @@ class AgentConfig:
                 self._data.update(loaded)
         except Exception:
             pass
+
+    def _migrate(self):
+        """구 버전 설정 마이그레이션 — 낮은 기본값을 신규 기본값으로 업그레이드"""
+        changed = False
+        # v3.2.4 이전: screen_quality=60, screen_fps=15 → 80, 30
+        if self._data.get('screen_quality', 0) <= 60:
+            self._data['screen_quality'] = 80
+            changed = True
+        if self._data.get('screen_fps', 0) <= 15:
+            self._data['screen_fps'] = 30
+            changed = True
+        if changed:
+            self._save()
 
     def _save(self):
         try:
@@ -107,11 +121,11 @@ class AgentConfig:
 
     @property
     def screen_quality(self) -> int:
-        return self._data.get('screen_quality', 60)
+        return self._data.get('screen_quality', 80)
 
     @property
     def screen_fps(self) -> int:
-        return self._data.get('screen_fps', 15)
+        return self._data.get('screen_fps', 30)
 
     @property
     def thumbnail_quality(self) -> int:

@@ -278,7 +278,7 @@ class DesktopWidget(QMainWindow):
         self._fps_frame_count = 0    # FPS 계측용 (1초마다 리셋)
         self._total_frame_count = 0  # 누적 프레임 수 (리셋 안 함)
         self._current_fps = 0
-        self._current_quality = settings.get('screen.stream_quality', 70)
+        self._current_quality = settings.get('screen.stream_quality', 80)
         self._current_target_fps = settings.get('screen.stream_fps', 30)
         self._is_stretch = False   # 화면 비율 모드
         self._stream_start_time = time.time()

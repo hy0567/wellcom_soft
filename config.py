@@ -87,8 +87,8 @@ class Settings:
         },
         'screen': {
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
-            'stream_fps': 15,             # 전체 화면 스트리밍 FPS
-            'stream_quality': 60,         # 스트리밍 JPEG 품질 (1-100)
+            'stream_fps': 30,             # 전체 화면 스트리밍 FPS (LinkIO 수준)
+            'stream_quality': 80,         # 스트리밍 JPEG/H.264 품질 (1-100)
             'thumbnail_quality': 50,      # 썸네일 JPEG 품질 (40→50 개선)
             'thumbnail_width': 480,       # 썸네일 최대 너비 (320→480 개선)
         },
@@ -148,6 +148,7 @@ class Settings:
             cls._instance = super().__new__(cls)
             cls._instance._data = {}
             cls._instance._load()
+            cls._instance._migrate()
         return cls._instance
 
     def _load(self):
@@ -159,6 +160,23 @@ class Settings:
         except Exception as e:
             print(f"설정 로드 실패: {e}")
             self._data = {}
+
+    def _migrate(self):
+        """구 버전 설정 마이그레이션 — 낮은 기본값을 신규 기본값으로 업그레이드"""
+        changed = False
+        screen = self._data.get('screen', {})
+
+        # v3.2.4 이전: stream_quality=60, stream_fps=15 → 80, 30
+        if screen.get('stream_quality', 0) <= 60:
+            screen['stream_quality'] = 80
+            changed = True
+        if screen.get('stream_fps', 0) <= 15:
+            screen['stream_fps'] = 30
+            changed = True
+
+        if changed:
+            self._data['screen'] = screen
+            self.save()
 
     def save(self):
         """설정 파일 저장"""

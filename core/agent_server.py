@@ -260,7 +260,7 @@ class AgentServer(QObject):
     def request_thumbnail(self, agent_id: str):
         self._send_to_agent(agent_id, {'type': 'request_thumbnail'})
 
-    def start_streaming(self, agent_id: str, fps: int = 15, quality: int = 60,
+    def start_streaming(self, agent_id: str, fps: int = 30, quality: int = 80,
                         codec: str = 'h264', keyframe_interval: int = 60):
         self._send_to_agent(agent_id, {
             'type': 'start_stream', 'fps': fps, 'quality': quality,
