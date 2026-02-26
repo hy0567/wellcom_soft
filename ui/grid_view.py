@@ -10,7 +10,7 @@ from typing import Dict
 from PyQt6.QtWidgets import (
     QScrollArea, QWidget, QGridLayout, QLabel, QVBoxLayout,
     QFrame, QSizePolicy, QHBoxLayout, QPushButton,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, QByteArray, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QColor, QPalette, QMouseEvent, QFont, QPainter
@@ -116,6 +116,14 @@ class PCThumbnailWidget(QFrame):
         self.mode_label.setVisible(False)
         row1_layout.addWidget(self.mode_label)
 
+        # 핑 레이턴시 배지
+        self.latency_label = QLabel()
+        self.latency_label.setFont(QFont("", 8, QFont.Weight.Bold))
+        self.latency_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.latency_label.setFixedHeight(20)
+        self.latency_label.setVisible(False)
+        row1_layout.addWidget(self.latency_label)
+
         layout.addWidget(row1)
 
         # ── 하단 Row 2: 버전 + 업데이트 버튼 + 메모 ──
@@ -153,6 +161,32 @@ class PCThumbnailWidget(QFrame):
         row2_layout.addWidget(self.memo_label)
 
         layout.addWidget(row2)
+
+        # ── 하단 Row 3: CPU/RAM 미니 바 ──
+        row3 = QWidget()
+        row3.setStyleSheet("background: transparent;")
+        row3.setFixedHeight(16)
+        row3_layout = QHBoxLayout(row3)
+        row3_layout.setContentsMargins(2, 0, 2, 0)
+        row3_layout.setSpacing(4)
+
+        self._cpu_bar = QLabel()
+        self._cpu_bar.setFixedHeight(4)
+        self._cpu_bar.setStyleSheet("background-color: #333; border-radius: 2px;")
+        row3_layout.addWidget(self._cpu_bar)
+
+        self._ram_bar = QLabel()
+        self._ram_bar.setFixedHeight(4)
+        self._ram_bar.setStyleSheet("background-color: #333; border-radius: 2px;")
+        row3_layout.addWidget(self._ram_bar)
+
+        self._perf_label = QLabel()
+        self._perf_label.setFont(QFont("", 7))
+        self._perf_label.setStyleSheet("color: #666; background: transparent;")
+        self._perf_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row3_layout.addWidget(self._perf_label)
+
+        layout.addWidget(row3)
 
         self._update_style()
 
@@ -272,6 +306,45 @@ class PCThumbnailWidget(QFrame):
         else:
             self.mode_label.setVisible(False)
 
+    # ── 성능 모니터 ────────────────────────────────────────
+
+    def update_performance(self, cpu: float, ram: float):
+        """CPU/RAM 사용률 업데이트 (미니 바 + 텍스트)"""
+        def _bar_color(val):
+            if val <= 60:
+                return '#27ae60'
+            elif val <= 85:
+                return '#f39c12'
+            return '#e74c3c'
+
+        self._cpu_bar.setStyleSheet(
+            f"background-color: {_bar_color(cpu)}; border-radius: 2px;"
+            f" max-width: {max(2, int(cpu))}px;"
+        )
+        self._ram_bar.setStyleSheet(
+            f"background-color: {_bar_color(ram)}; border-radius: 2px;"
+            f" max-width: {max(2, int(ram))}px;"
+        )
+        self._perf_label.setText(f"C:{cpu:.0f}% R:{ram:.0f}%")
+        self._perf_label.setStyleSheet("color: #888; background: transparent;")
+
+    # ── 핑 레이턴시 ────────────────────────────────────────
+
+    def update_latency(self, ms: int):
+        """핑 레이턴시 업데이트"""
+        if ms <= 50:
+            bg = '#27ae60'  # 녹색
+        elif ms <= 150:
+            bg = '#f39c12'  # 노란색
+        else:
+            bg = '#e74c3c'  # 빨간색
+        self.latency_label.setText(f"{ms}ms")
+        self.latency_label.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: #fff;"
+            f" border-radius: 4px; padding: 2px 6px; }}"
+        )
+        self.latency_label.setVisible(True)
+
     # ── 스타일 갱신 ──────────────────────────────────────────
 
     def _update_style(self):
@@ -377,7 +450,7 @@ class PlaceholderSlotWidget(QFrame):
         layout.addWidget(lbl)
 
 
-class GridView(QScrollArea):
+class GridView(QWidget):
     """다중 PC 썸네일 그리드 (LinkIO 스타일)"""
 
     open_viewer = pyqtSignal(str)               # pc_name
@@ -392,18 +465,51 @@ class GridView(QScrollArea):
         self._placeholders: list = []
         self._selected_pcs: set = set()
         self._push_agents: set = set()
+        self._filter_text: str = ''
 
-        # 스크롤 영역 설정
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setStyleSheet("QScrollArea { background-color: #1a1a1a; border: none; }")
+        # 메인 레이아웃 (검색 + 그리드)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ── 검색 바 ──
+        search_bar = QWidget()
+        search_bar.setStyleSheet("background-color: #1a1a1a;")
+        search_layout = QHBoxLayout(search_bar)
+        search_layout.setContentsMargins(12, 8, 12, 4)
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("PC 검색 (이름, 메모)...")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d30; color: #e0e0e0;
+                border: 1px solid #3e3e3e; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #007acc;
+            }
+        """)
+        self._search_input.textChanged.connect(self._on_filter_changed)
+        search_layout.addWidget(self._search_input)
+
+        main_layout.addWidget(search_bar)
+
+        # ── 스크롤 영역 ──
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { background-color: #1a1a1a; border: none; }")
 
         self._container = QWidget()
         self._container.setStyleSheet("background-color: #1a1a1a;")
         self._grid = QGridLayout(self._container)
         self._grid.setSpacing(12)
         self._grid.setContentsMargins(12, 12, 12, 12)
-        self.setWidget(self._container)
+        self._scroll.setWidget(self._container)
+
+        main_layout.addWidget(self._scroll)
 
         # 시그널 연결
         pc_manager.signals.devices_reloaded.connect(self.rebuild_grid)
@@ -415,6 +521,8 @@ class GridView(QScrollArea):
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
         agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
         agent_server.update_status_received.connect(self._on_update_status)
+        agent_server.latency_measured.connect(self._on_latency_measured)
+        agent_server.performance_received.connect(self._on_performance_received)
 
         # 썸네일 갱신 타이머
         frame_speed = settings.get('grid_view.frame_speed', 5)
@@ -422,6 +530,21 @@ class GridView(QScrollArea):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._request_all_thumbnails)
         self._refresh_timer.start(interval)
+
+        # 핑 타이머 (10초마다)
+        self._ping_timer = QTimer(self)
+        self._ping_timer.timeout.connect(self._ping_all)
+        self._ping_timer.start(10000)
+
+        # 성능 모니터링 타이머 (30초마다)
+        self._perf_timer = QTimer(self)
+        self._perf_timer.timeout.connect(self._request_all_performance)
+        self._perf_timer.start(30000)
+
+    def _on_filter_changed(self, text: str):
+        """검색어 변경 시 그리드 필터링"""
+        self._filter_text = text.strip().lower()
+        self.rebuild_grid()
 
     def rebuild_grid(self):
         """그리드 재구성"""
@@ -435,7 +558,17 @@ class GridView(QScrollArea):
             ph.deleteLater()
         self._placeholders.clear()
 
-        pcs = self.pc_manager.get_all_pcs()
+        all_pcs = self.pc_manager.get_all_pcs()
+
+        # 검색 필터 적용
+        if self._filter_text:
+            pcs = [
+                pc for pc in all_pcs
+                if self._filter_text in pc.name.lower()
+                or self._filter_text in getattr(pc.info, 'memo', '').lower()
+            ]
+        else:
+            pcs = all_pcs
         columns = self._calculate_columns()
         count = len(pcs)
 
@@ -484,7 +617,7 @@ class GridView(QScrollArea):
         if user_cols > 0:
             return user_cols
 
-        width = self.viewport().width()
+        width = self._scroll.viewport().width()
         if width <= 0:
             return 5
         col_width = 280
@@ -546,6 +679,32 @@ class GridView(QScrollArea):
             if thumb:
                 thumb.set_update_status('checking')
             self.agent_server.send_update_request(pc.agent_id)
+
+    def _ping_all(self):
+        """모든 연결된 에이전트에 핑 전송"""
+        self.agent_server.ping_all_agents()
+
+    def _request_all_performance(self):
+        """모든 연결된 에이전트에 성능 정보 요청"""
+        self.agent_server.request_all_performance()
+
+    def _on_performance_received(self, agent_id: str, data: dict):
+        """성능 데이터 수신 → 카드에 CPU/RAM 바 표시"""
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            thumb = self._thumbnails.get(pc.name)
+            if thumb:
+                cpu = data.get('cpu', 0)
+                ram = data.get('ram', 0)
+                thumb.update_performance(cpu, ram)
+
+    def _on_latency_measured(self, agent_id: str, ms: int):
+        """핑 응답 수신 → 카드에 레이턴시 표시"""
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            thumb = self._thumbnails.get(pc.name)
+            if thumb:
+                thumb.update_latency(ms)
 
     def _on_update_status(self, agent_id: str, status_dict: dict):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)

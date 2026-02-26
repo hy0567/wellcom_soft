@@ -69,6 +69,10 @@ class SideMenu(QWidget):
     # v2.0.1 — 화면 비율
     ratio_toggle_clicked = pyqtSignal()
 
+    # v3.3 — 모니터 선택 / 오디오
+    monitor_clicked = pyqtSignal()
+    audio_toggle_clicked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(50)
@@ -120,6 +124,14 @@ class SideMenu(QWidget):
         self.btn_screenshot = SideMenuButton("SS", "스크린샷 저장")
         self.btn_screenshot.clicked.connect(self.screenshot_clicked.emit)
         layout.addWidget(self.btn_screenshot)
+
+        self.btn_monitor = SideMenuButton("M", "모니터 선택")
+        self.btn_monitor.clicked.connect(self.monitor_clicked.emit)
+        layout.addWidget(self.btn_monitor)
+
+        self.btn_audio = SideMenuButton("A", "오디오 켜기/끄기")
+        self.btn_audio.clicked.connect(self.audio_toggle_clicked.emit)
+        layout.addWidget(self.btn_audio)
 
         layout.addSpacing(6)
 

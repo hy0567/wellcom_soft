@@ -88,6 +88,10 @@ class AgentServer(QObject):
     command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
     connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
     update_status_received = pyqtSignal(str, dict)     # agent_id, status_dict
+    latency_measured = pyqtSignal(str, int)             # agent_id, ms
+    monitors_received = pyqtSignal(str, list)           # agent_id, monitors_list
+    performance_received = pyqtSignal(str, dict)        # agent_id, {cpu, ram, disk}
+    audio_received = pyqtSignal(str, bytes)             # agent_id, pcm_data
 
     CHUNK_SIZE = 64 * 1024  # 64KB
 
@@ -96,6 +100,7 @@ class AgentServer(QObject):
     HEADER_STREAM = 0x02
     HEADER_H264_KEYFRAME = 0x03
     HEADER_H264_DELTA = 0x04
+    HEADER_AUDIO = 0x05
 
     def __init__(self):
         super().__init__()
@@ -111,6 +116,8 @@ class AgentServer(QObject):
         self._timeout_lan: int = 3
         self._timeout_wan: int = 5
         self._reconnect_interval: int = 10
+        # 핑 타임스탬프 (agent_id → send_time)
+        self._ping_times: Dict[str, float] = {}
 
     @property
     def connected_count(self) -> int:
@@ -355,6 +362,50 @@ class AgentServer(QObject):
     def broadcast_command(self, agent_ids: List[str], command: str):
         for agent_id in agent_ids:
             self.execute_command(agent_id, command)
+
+    def ping_agent(self, agent_id: str):
+        """에이전트에 ping 전송 (RTT 측정용)"""
+        import time
+        self._ping_times[agent_id] = time.time()
+        self._send_to_agent(agent_id, {'type': 'ping', 'ts': self._ping_times[agent_id]})
+
+    def ping_all_agents(self):
+        """모든 연결된 에이전트에 ping 전송"""
+        for agent_id in self.get_connected_agents():
+            self.ping_agent(agent_id)
+
+    def start_audio_stream(self, agent_id: str, sample_rate: int = 16000, channels: int = 1):
+        """에이전트에 오디오 스트리밍 시작 요청"""
+        self._send_to_agent(agent_id, {
+            'type': 'start_audio',
+            'sample_rate': sample_rate,
+            'channels': channels,
+        })
+
+    def stop_audio_stream(self, agent_id: str):
+        """에이전트에 오디오 스트리밍 중지 요청"""
+        self._send_to_agent(agent_id, {'type': 'stop_audio'})
+
+    def request_performance(self, agent_id: str):
+        """에이전트의 성능 정보(CPU/RAM/Disk) 요청"""
+        self._send_to_agent(agent_id, {'type': 'get_performance'})
+
+    def request_all_performance(self):
+        """모든 연결된 에이전트에 성능 정보 요청"""
+        for agent_id in self.get_connected_agents():
+            self.request_performance(agent_id)
+
+    def request_monitors(self, agent_id: str):
+        """에이전트의 모니터 목록 요청"""
+        self._send_to_agent(agent_id, {'type': 'get_monitors'})
+
+    def select_monitor(self, agent_id: str, index: int):
+        """에이전트의 캡처 모니터 변경"""
+        self._send_to_agent(agent_id, {'type': 'select_monitor', 'index': index})
+
+    def send_power_action(self, agent_id: str, action: str):
+        """에이전트에 전원 관리 명령 전송 (shutdown/restart/logoff/sleep)"""
+        self._send_to_agent(agent_id, {'type': 'power_action', 'action': action})
 
     def send_update_request(self, agent_id: str):
         """에이전트에 원격 업데이트 요청 전송"""
@@ -768,7 +819,11 @@ class AgentServer(QObject):
                 self.clipboard_received.emit(agent_id, 'image', png_data)
 
         elif msg_type == 'pong':
-            pass
+            import time
+            send_time = self._ping_times.pop(agent_id, None)
+            if send_time is not None:
+                rtt_ms = int((time.time() - send_time) * 1000)
+                self.latency_measured.emit(agent_id, rtt_ms)
 
         elif msg_type == 'file_progress':
             received = msg.get('received', 0)
@@ -790,6 +845,16 @@ class AgentServer(QObject):
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
 
+        elif msg_type == 'monitors_info':
+            monitors = msg.get('monitors', [])
+            self.monitors_received.emit(agent_id, monitors)
+
+        elif msg_type == 'performance_data':
+            self.performance_received.emit(agent_id, msg)
+
+        elif msg_type == 'power_result':
+            pass  # 전원 명령 결과 (로그용)
+
     def _handle_p2p_binary(self, agent_id: str, data: bytes):
         """P2P 직접 연결 바이너리 처리 (32B prefix 없음 — 직접 연결)"""
         if len(data) < 2:
@@ -804,6 +869,8 @@ class AgentServer(QObject):
             self.screen_frame_received.emit(agent_id, frame_data)
         elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
             self.h264_frame_received.emit(agent_id, header, frame_data)
+        elif header == self.HEADER_AUDIO:
+            self.audio_received.emit(agent_id, frame_data)
 
     # ==================== 서버 릴레이 (폴백) ====================
 
@@ -1005,6 +1072,8 @@ class AgentServer(QObject):
             self.screen_frame_received.emit(agent_id, frame_data)
         elif header in (self.HEADER_H264_KEYFRAME, self.HEADER_H264_DELTA):
             self.h264_frame_received.emit(agent_id, header, frame_data)
+        elif header == self.HEADER_AUDIO:
+            self.audio_received.emit(agent_id, frame_data)
 
     # ==================== UDP 홀펀칭 P2P ====================
 

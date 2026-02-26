@@ -84,6 +84,35 @@ class ScreenCapture:
     def screen_size(self) -> Tuple[int, int]:
         return self._screen_w, self._screen_h
 
+    def get_monitors(self) -> list:
+        """모니터 목록 반환 (index 1부터 = 개별 모니터)"""
+        if not self._sct:
+            return []
+        monitors = self._sct.monitors
+        result = []
+        for i, m in enumerate(monitors):
+            if i == 0:
+                continue  # index 0 = 전체 가상 화면
+            result.append({
+                'id': i,
+                'width': m['width'],
+                'height': m['height'],
+                'x': m['left'],
+                'y': m['top'],
+            })
+        return result
+
+    def set_monitor(self, index: int):
+        """캡처 대상 모니터 변경 (1-based index)"""
+        if not self._sct:
+            return
+        monitors = self._sct.monitors
+        if 0 <= index < len(monitors):
+            self._monitor = monitors[index]
+            self._screen_w = self._monitor['width']
+            self._screen_h = self._monitor['height']
+            logger.info(f"[ScreenCapture] 모니터 변경: #{index} {self._screen_w}x{self._screen_h}")
+
     def _create_placeholder(self, width: int, height: int, text: str = "캡처 실패") -> bytes:
         """캡처 실패 시 플레이스홀더 이미지 생성"""
         if not PIL_AVAILABLE:

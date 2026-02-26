@@ -292,6 +292,9 @@ class DesktopWidget(QMainWindow):
         self._h264_decoder: Optional[H264Decoder] = None
         self._stream_codec = 'mjpeg'  # 실제 사용 코덱 ('mjpeg' 또는 'h264')
 
+        # 파일 드래그&드롭 지원
+        self.setAcceptDrops(True)
+
         self._init_ui()
         self._connect_signals()
         self._load_geometry()
@@ -374,6 +377,17 @@ class DesktopWidget(QMainWindow):
         self._side_menu.alt_tab_clicked.connect(self._send_alt_tab)
         self._side_menu.win_key_clicked.connect(self._send_win_key)
         self._side_menu.ratio_toggle_clicked.connect(self._toggle_aspect_ratio)
+        self._side_menu.monitor_clicked.connect(self._select_monitor)
+        self._side_menu.audio_toggle_clicked.connect(self._toggle_audio)
+
+        # 모니터 목록 수신
+        self._server.monitors_received.connect(self._on_monitors_received)
+        self._monitors_list = []
+
+        # 오디오 스트리밍
+        self._audio_enabled = False
+        self._audio_stream = None
+        self._server.audio_received.connect(self._on_audio_received)
 
         if settings.get('desktop_widget.side_menu', True):
             layout.addWidget(self._side_menu)
@@ -450,6 +464,8 @@ class DesktopWidget(QMainWindow):
         self._server.stream_started.connect(self._on_stream_started)
         self._server.agent_disconnected.connect(self._on_agent_disconnected)
         self._server.connection_mode_changed.connect(self._on_connection_mode_changed)
+        self._server.file_progress.connect(self._on_file_progress)
+        self._server.file_complete.connect(self._on_file_complete)
 
     def _load_geometry(self):
         """저장된 창 위치/크기 복원"""
@@ -758,16 +774,123 @@ class DesktopWidget(QMainWindow):
             self._server.send_file(self._pc.agent_id, path)
 
     def _save_screenshot(self):
-        """현재 화면 스크린샷 저장"""
+        """현재 화면 스크린샷 저장 + 클립보드 복사"""
         pixmap = self._screen.current_pixmap
         if pixmap.isNull():
             return
+
+        # 기본 저장 경로
+        import os
+        from datetime import datetime
+        save_dir = os.path.join(os.path.expanduser('~'), 'Desktop', 'WellcomSOFT_Screenshots')
+        os.makedirs(save_dir, exist_ok=True)
+        default_name = f"{self._pc.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        default_path = os.path.join(save_dir, default_name)
+
         path, _ = QFileDialog.getSaveFileName(
-            self, "스크린샷 저장", f"{self._pc.name}_screenshot.png",
+            self, "스크린샷 저장", default_path,
             "PNG (*.png);;JPEG (*.jpg)"
         )
         if path:
             pixmap.save(path)
+
+        # 클립보드에도 복사
+        QApplication.clipboard().setPixmap(pixmap)
+
+        # 오버레이 알림
+        self._show_overlay_notification("스크린샷 저장 완료" if path else "클립보드에 복사됨")
+
+    def _toggle_audio(self):
+        """오디오 스트리밍 토글"""
+        if self._audio_enabled:
+            self._audio_enabled = False
+            self._server.stop_audio_stream(self._pc.agent_id)
+            if self._audio_stream:
+                try:
+                    self._audio_stream.stop()
+                    self._audio_stream.close()
+                except Exception:
+                    pass
+                self._audio_stream = None
+            self._show_overlay_notification("오디오 OFF")
+        else:
+            self._audio_enabled = True
+            try:
+                import sounddevice as sd
+                self._audio_stream = sd.OutputStream(
+                    samplerate=16000, channels=1, dtype='int16',
+                )
+                self._audio_stream.start()
+            except ImportError:
+                self._show_overlay_notification("sounddevice 미설치")
+                self._audio_enabled = False
+                return
+            except Exception as e:
+                logger.warning(f"[Audio] 출력 스트림 생성 실패: {e}")
+                self._audio_enabled = False
+                return
+            self._server.start_audio_stream(self._pc.agent_id)
+            self._show_overlay_notification("오디오 ON")
+
+    def _on_audio_received(self, agent_id: str, pcm_data: bytes):
+        """오디오 PCM 데이터 수신 → 재생"""
+        if agent_id != self._pc.agent_id or not self._audio_enabled:
+            return
+        if self._audio_stream:
+            try:
+                import numpy as np
+                audio = np.frombuffer(pcm_data, dtype=np.int16)
+                self._audio_stream.write(audio)
+            except Exception:
+                pass
+
+    def _select_monitor(self):
+        """모니터 선택 — 에이전트에 목록 요청 후 팝업"""
+        self._server.request_monitors(self._pc.agent_id)
+
+    def _on_monitors_received(self, agent_id: str, monitors: list):
+        """에이전트 모니터 목록 수신 → 선택 다이얼로그"""
+        if agent_id != self._pc.agent_id:
+            return
+        self._monitors_list = monitors
+        if not monitors:
+            return
+        if len(monitors) == 1:
+            self._show_overlay_notification("모니터 1개만 감지됨")
+            return
+
+        items = [f"모니터 {m['id']}: {m['width']}x{m['height']} ({m['x']},{m['y']})"
+                 for m in monitors]
+        items.insert(0, "전체 화면 (모든 모니터)")
+
+        item, ok = QInputDialog.getItem(
+            self, "모니터 선택", "캡처할 모니터:", items, 0, False
+        )
+        if ok:
+            idx = items.index(item)
+            if idx == 0:
+                self._server.select_monitor(self._pc.agent_id, 0)  # 전체
+            else:
+                mon = monitors[idx - 1]
+                self._server.select_monitor(self._pc.agent_id, mon['id'])
+
+    def _show_overlay_notification(self, text: str, duration: int = 2000):
+        """화면 위에 일시적 알림 표시"""
+        from PyQt6.QtWidgets import QLabel as _OvlLabel
+        overlay = _OvlLabel(text, self._screen)
+        overlay.setStyleSheet(
+            "QLabel { background-color: rgba(0,122,204,200); color: white;"
+            " border-radius: 8px; padding: 10px 20px; font-size: 14px;"
+            " font-weight: bold; }"
+        )
+        overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay.adjustSize()
+        overlay.move(
+            (self._screen.width() - overlay.width()) // 2,
+            self._screen.height() - overlay.height() - 30
+        )
+        overlay.show()
+        QTimer.singleShot(duration, overlay.deleteLater)
 
     def _execute_command(self):
         """원격 명령 실행"""
@@ -974,6 +1097,52 @@ class DesktopWidget(QMainWindow):
             return 'middle'
         return 'none'
 
+    # ==================== 파일 전송 진행 ====================
+
+    def _on_file_progress(self, agent_id: str, sent: int, total: int):
+        if agent_id != self._pc.agent_id:
+            return
+        if total > 0:
+            pct = int(sent * 100 / total)
+            self._update_statusbar_field('file_progress', f"전송 {pct}%")
+
+    def _on_file_complete(self, agent_id: str, remote_path: str):
+        if agent_id != self._pc.agent_id:
+            return
+        import os
+        name = os.path.basename(remote_path) if remote_path else "파일"
+        self._show_overlay_notification(f"전송 완료: {name}")
+        self._update_statusbar_field('file_progress', '')
+
+    def _update_statusbar_field(self, field: str, text: str):
+        """상태바 필드 업데이트 (있으면)"""
+        label = getattr(self, f'_status_{field}', None)
+        if label:
+            label.setText(text)
+
+    # ==================== 드래그 & 드롭 파일 전송 ====================
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragOverEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        import os
+        files = [u.toLocalFile() for u in urls if u.toLocalFile() and os.path.isfile(u.toLocalFile())]
+        if not files:
+            return
+        event.acceptProposedAction()
+        for file_path in files:
+            self._server.send_file(self._pc.agent_id, file_path)
+            self._show_overlay_notification(f"전송 중: {os.path.basename(file_path)}")
+
     # ==================== 윈도우 이벤트 ====================
 
     def closeEvent(self, event):
@@ -985,6 +1154,18 @@ class DesktopWidget(QMainWindow):
 
         # 스트리밍 중지
         self._server.stop_streaming(self._pc.agent_id)
+
+        # 오디오 스트리밍 중지
+        if self._audio_enabled:
+            self._server.stop_audio_stream(self._pc.agent_id)
+            self._audio_enabled = False
+        if self._audio_stream:
+            try:
+                self._audio_stream.stop()
+                self._audio_stream.close()
+            except Exception:
+                pass
+            self._audio_stream = None
 
         # H.264 디코더 정리 (v2.0.2)
         if self._h264_decoder:

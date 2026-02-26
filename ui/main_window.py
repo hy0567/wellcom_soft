@@ -11,12 +11,12 @@ from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QTreeWidget, QTreeWidgetItem,
     QWidget, QVBoxLayout, QHBoxLayout,
     QToolBar, QLabel, QMenu, QMessageBox,
-    QInputDialog, QApplication, QSpinBox,
+    QInputDialog, QApplication, QSpinBox, QSystemTrayIcon,
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QAction, QColor, QBrush, QFont, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QColor, QBrush, QFont, QShortcut, QKeySequence, QIcon
 
-from config import settings, WINDOW_TITLE, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT
+from config import settings, WINDOW_TITLE, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT, ICON_PATH
 from core.pc_manager import PCManager
 from core.agent_server import AgentServer
 from core.multi_control import MultiControlManager
@@ -97,6 +97,9 @@ class MainWindow(QMainWindow):
 
         self.agent_count_label = QLabel("에이전트: 0/0")
         self.statusBar().addPermanentWidget(self.agent_count_label)
+
+        # 시스템 트레이
+        self._setup_tray()
 
         # 단축키
         QShortcut(QKeySequence("Ctrl+1"), self, self._toggle_multi_control)
@@ -369,6 +372,31 @@ class MainWindow(QMainWindow):
         info_action = menu.addAction("PC 정보")
         info_action.triggered.connect(lambda: self._show_pc_info(pc_name))
         menu.addSeparator()
+
+        # 전원 관리 서브메뉴
+        pc = self.pc_manager.get_pc(pc_name)
+        if pc and pc.is_online:
+            power_menu = menu.addMenu("전원 관리")
+            shutdown_action = power_menu.addAction("종료")
+            shutdown_action.triggered.connect(
+                lambda: self._send_power_action(pc_name, 'shutdown'))
+            restart_action = power_menu.addAction("재시작")
+            restart_action.triggered.connect(
+                lambda: self._send_power_action(pc_name, 'restart'))
+            logoff_action = power_menu.addAction("로그오프")
+            logoff_action.triggered.connect(
+                lambda: self._send_power_action(pc_name, 'logoff'))
+            sleep_action = power_menu.addAction("절전")
+            sleep_action.triggered.connect(
+                lambda: self._send_power_action(pc_name, 'sleep'))
+            menu.addSeparator()
+
+        # Wake-on-LAN (오프라인 PC에도 표시)
+        if pc and not pc.is_online and getattr(pc.info, 'mac_address', ''):
+            wol_action = menu.addAction("Wake-on-LAN")
+            wol_action.triggered.connect(lambda: self._send_wol(pc_name))
+            menu.addSeparator()
+
         rename_action = menu.addAction("이름 변경")
         rename_action.triggered.connect(lambda: self._rename_pc(pc_name))
         memo_action = menu.addAction("메모 편집")
@@ -606,6 +634,35 @@ class MainWindow(QMainWindow):
 
     # ==================== 도구 ====================
 
+    def _send_wol(self, pc_name: str):
+        """Wake-on-LAN 매직 패킷 전송"""
+        pc = self.pc_manager.get_pc(pc_name)
+        if not pc or not getattr(pc.info, 'mac_address', ''):
+            QMessageBox.warning(self, "WoL 실패", f"'{pc_name}'의 MAC 주소를 알 수 없습니다.")
+            return
+        from core.wol import send_wol
+        success = send_wol(pc.info.mac_address)
+        if success:
+            self.status_label.setText(f"WoL 전송: {pc_name} ({pc.info.mac_address})")
+        else:
+            QMessageBox.warning(self, "WoL 실패", "매직 패킷 전송에 실패했습니다.")
+
+    def _send_power_action(self, pc_name: str, action: str):
+        """전원 관리 명령 전송"""
+        labels = {'shutdown': '종료', 'restart': '재시작', 'logoff': '로그오프', 'sleep': '절전'}
+        label = labels.get(action, action)
+        reply = QMessageBox.question(
+            self, "전원 관리",
+            f"'{pc_name}'에 {label} 명령을 보내시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        pc = self.pc_manager.get_pc(pc_name)
+        if pc and pc.agent_id:
+            self.agent_server.send_power_action(pc.agent_id, action)
+            self.status_label.setText(f"전원 명령: {label} → {pc_name}")
+
     def _broadcast_command_dialog(self):
         command, ok = QInputDialog.getText(self, "원격 명령 실행", "명령어:")
         if not ok or not command.strip():
@@ -722,6 +779,70 @@ class MainWindow(QMainWindow):
             f"<p>2025 WellcomSOFT. All rights reserved.</p>"
         )
 
+    # ==================== 시스템 트레이 ====================
+
+    def _setup_tray(self):
+        """시스템 트레이 아이콘 설정"""
+        self._tray_icon = QSystemTrayIcon(self)
+        self._really_quit = False  # True면 실제 종료, False면 트레이로 최소화
+
+        if ICON_PATH:
+            self._tray_icon.setIcon(QIcon(ICON_PATH))
+        else:
+            self._tray_icon.setIcon(self.style().standardIcon(
+                self.style().StandardPixmap.SP_ComputerIcon
+            ))
+
+        # 트레이 메뉴
+        tray_menu = QMenu()
+        show_action = tray_menu.addAction("열기")
+        show_action.triggered.connect(self._tray_show)
+        tray_menu.addSeparator()
+        quit_action = tray_menu.addAction("종료")
+        quit_action.triggered.connect(self._tray_quit)
+        self._tray_icon.setContextMenu(tray_menu)
+
+        # 더블클릭 → 복원
+        self._tray_icon.activated.connect(self._on_tray_activated)
+
+        self._tray_icon.setToolTip(WINDOW_TITLE)
+        self._tray_icon.show()
+
+        # 에이전트 연결/해제 알림
+        self.agent_server.agent_connected.connect(self._tray_notify_connected)
+        self.agent_server.agent_disconnected.connect(self._tray_notify_disconnected)
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_show()
+
+    def _tray_show(self):
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _tray_quit(self):
+        self._really_quit = True
+        self.close()
+
+    def _tray_notify_connected(self, agent_id: str, ip: str):
+        if self._tray_icon.isVisible() and self.isHidden():
+            pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+            name = pc.name if pc else agent_id
+            self._tray_icon.showMessage(
+                "에이전트 연결", f"{name} 접속됨 ({ip})",
+                QSystemTrayIcon.MessageIcon.Information, 3000
+            )
+
+    def _tray_notify_disconnected(self, agent_id: str):
+        if self._tray_icon.isVisible() and self.isHidden():
+            pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+            name = pc.name if pc else agent_id
+            self._tray_icon.showMessage(
+                "에이전트 해제", f"{name} 연결 끊김",
+                QSystemTrayIcon.MessageIcon.Warning, 3000
+            )
+
     # ==================== 윈도우 이벤트 ====================
 
     def closeEvent(self, event):
@@ -733,7 +854,18 @@ class MainWindow(QMainWindow):
             settings.set('window.height', geo.height(), auto_save=False)
         settings.set('window.maximized', self.isMaximized())
 
+        # 트레이로 최소화 (실제 종료가 아닌 경우)
+        if not self._really_quit and self._tray_icon.isVisible():
+            event.ignore()
+            self.hide()
+            self._tray_icon.showMessage(
+                WINDOW_TITLE, "트레이로 최소화되었습니다.",
+                QSystemTrayIcon.MessageIcon.Information, 2000
+            )
+            return
+
         for dw in list(self._desktop_widgets.values()):
             dw.close()
 
+        self._tray_icon.hide()
         event.accept()

@@ -582,6 +582,9 @@ class WellcomAgent:
         self._ws_port = self.config.ws_port or 21350
         self._agent_version = ""  # start()에서 version.py 로드
 
+        # 오디오 스트리밍
+        self._audio_streaming = False
+
         # UPnP
         self._upnp = None
 
@@ -1278,6 +1281,46 @@ class WellcomAgent:
                     'data': base64.b64encode(data).decode('ascii'),
                 }))
 
+        elif msg_type == 'start_audio':
+            await self._start_audio_capture(websocket, msg)
+
+        elif msg_type == 'stop_audio':
+            self._stop_audio_capture()
+
+        elif msg_type == 'get_performance':
+            try:
+                import psutil
+                cpu = psutil.cpu_percent(interval=0)
+                ram = psutil.virtual_memory().percent
+                disk = psutil.disk_usage('/').percent if os.name != 'nt' else psutil.disk_usage('C:\\').percent
+                await websocket.send(json.dumps({
+                    'type': 'performance_data',
+                    'cpu': round(cpu, 1),
+                    'ram': round(ram, 1),
+                    'disk': round(disk, 1),
+                }))
+            except Exception as e:
+                logger.debug(f"[Performance] 수집 실패: {e}")
+
+        elif msg_type == 'get_monitors':
+            monitors = self.screen_capture.get_monitors()
+            await websocket.send(json.dumps({
+                'type': 'monitors_info', 'monitors': monitors,
+            }))
+
+        elif msg_type == 'select_monitor':
+            index = msg.get('index', 1)
+            self.screen_capture.set_monitor(index)
+            await websocket.send(json.dumps({
+                'type': 'monitor_changed', 'index': index,
+                'width': self.screen_capture.screen_size[0],
+                'height': self.screen_capture.screen_size[1],
+            }))
+
+        elif msg_type == 'power_action':
+            action = msg.get('action', '')
+            await self._handle_power_action(websocket, action)
+
         elif msg_type == 'execute':
             command = msg.get('command', '')
             await self._execute_command(websocket, command)
@@ -1571,6 +1614,98 @@ class WellcomAgent:
             self._stream_tasks.pop(manager_id, None)
             self._stream_settings.pop(manager_id, None)
             logger.info(f"[{manager_id}] 스트리밍 중지 (codec={actual_codec})")
+
+    async def _start_audio_capture(self, websocket, msg: dict):
+        """오디오 루프백 캡처 시작"""
+        self._audio_streaming = True
+        sample_rate = msg.get('sample_rate', 16000)
+        channels = msg.get('channels', 1)
+        chunk_size = msg.get('chunk_size', 1024)
+
+        async def _audio_loop():
+            try:
+                import sounddevice as sd
+            except ImportError:
+                logger.warning("[Audio] sounddevice 미설치 — 오디오 캡처 불가")
+                await websocket.send(json.dumps({
+                    'type': 'audio_error', 'error': 'sounddevice 미설치',
+                }))
+                return
+
+            logger.info(f"[Audio] 캡처 시작: {sample_rate}Hz, {channels}ch, chunk={chunk_size}")
+            try:
+                # WASAPI 루프백 (Windows), 기본 입력 (기타)
+                device = None
+                try:
+                    # 루프백 디바이스 검색 (Windows WASAPI)
+                    devices = sd.query_devices()
+                    for i, d in enumerate(devices):
+                        if 'loopback' in d['name'].lower() or 'stereo mix' in d['name'].lower():
+                            device = i
+                            break
+                except Exception:
+                    pass
+
+                stream = sd.InputStream(
+                    samplerate=sample_rate,
+                    channels=channels,
+                    blocksize=chunk_size,
+                    dtype='int16',
+                    device=device,
+                )
+                stream.start()
+
+                while self._audio_streaming:
+                    data, overflowed = stream.read(chunk_size)
+                    pcm = data.tobytes()
+                    # 바이너리 헤더 0x05 + PCM 데이터
+                    await websocket.send(bytes([0x05]) + pcm)
+                    await asyncio.sleep(chunk_size / sample_rate * 0.8)
+
+                stream.stop()
+                stream.close()
+                logger.info("[Audio] 캡처 중지")
+            except Exception as e:
+                logger.error(f"[Audio] 캡처 오류: {e}")
+                self._audio_streaming = False
+
+        asyncio.ensure_future(_audio_loop())
+
+    def _stop_audio_capture(self):
+        """오디오 캡처 중지"""
+        self._audio_streaming = False
+
+    async def _handle_power_action(self, websocket, action: str):
+        """원격 전원 관리 (shutdown/restart/logoff/sleep)"""
+        import platform
+        commands = {
+            'shutdown': 'shutdown /s /t 5 /f',
+            'restart': 'shutdown /r /t 5 /f',
+            'logoff': 'shutdown /l /f',
+            'sleep': 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0',
+        }
+        if platform.system() != 'Windows':
+            commands = {
+                'shutdown': 'shutdown -h now',
+                'restart': 'shutdown -r now',
+                'logoff': 'loginctl terminate-user $USER',
+                'sleep': 'systemctl suspend',
+            }
+        cmd = commands.get(action)
+        if not cmd:
+            await websocket.send(json.dumps({
+                'type': 'power_result', 'action': action,
+                'success': False, 'error': f'알 수 없는 전원 동작: {action}',
+            }))
+            return
+        try:
+            await websocket.send(json.dumps({
+                'type': 'power_result', 'action': action, 'success': True,
+            }))
+            logger.info(f"[Power] 전원 동작 실행: {action} → {cmd}")
+            subprocess.Popen(cmd, shell=True)
+        except Exception as e:
+            logger.error(f"[Power] 전원 동작 실패: {e}")
 
     async def _execute_command(self, websocket, command: str):
         """원격 명령 실행"""
