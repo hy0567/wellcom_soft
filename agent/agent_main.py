@@ -866,6 +866,24 @@ class WellcomAgent:
                     self._relay_connected = True
                     self._update_tray_icon()
 
+                    # 시스템 정보 즉시 전송 (매니저가 DB 없이도 정보 표시 가능)
+                    try:
+                        sys_info = self._get_system_info()
+                        hw_info = self._get_hardware_info()
+                        screen_w, screen_h = self.screen_capture.screen_size
+                        await ws.send(json.dumps({
+                            'type': 'system_info',
+                            'agent_id': self._agent_id,
+                            **sys_info,
+                            **hw_info,
+                            'screen_width': screen_w,
+                            'screen_height': screen_h,
+                            'agent_version': self._agent_version,
+                        }))
+                        logger.info("[Relay] system_info 전송 완료")
+                    except Exception as e:
+                        logger.warning(f"[Relay] system_info 전송 실패: {e}")
+
                     # 매니저 메시지 처리 루프 (서버가 매니저의 메시지를 에이전트에게 전달)
                     async for message in ws:
                         if not self._running:
@@ -1437,6 +1455,25 @@ class WellcomAgent:
                 args=(websocket,),
                 daemon=True, name='UpdateWorker'
             ).start()
+
+        elif msg_type == 'request_info':
+            # 매니저가 시스템 정보 요청 → 즉시 응답
+            try:
+                sys_info = self._get_system_info()
+                hw_info = self._get_hardware_info()
+                screen_w, screen_h = self.screen_capture.screen_size
+                await websocket.send(json.dumps({
+                    'type': 'system_info',
+                    'agent_id': self._agent_id,
+                    **sys_info,
+                    **hw_info,
+                    'screen_width': screen_w,
+                    'screen_height': screen_h,
+                    'agent_version': self._agent_version,
+                }))
+                logger.debug("[Info] system_info 응답 전송")
+            except Exception as e:
+                logger.warning(f"[Info] system_info 응답 실패: {e}")
 
         elif msg_type == 'udp_offer':
             # 매니저의 UDP 홀펀칭 요청 → 비동기 처리

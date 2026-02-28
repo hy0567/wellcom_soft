@@ -87,6 +87,7 @@ class AgentServer(QObject):
     file_complete = pyqtSignal(str, str)               # agent_id, remote_path
     command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
     connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
+    agent_info_received = pyqtSignal(str, dict)        # agent_id, info_dict (system_info 수신)
     update_status_received = pyqtSignal(str, dict)     # agent_id, status_dict
     latency_measured = pyqtSignal(str, int)             # agent_id, ms
     monitors_received = pyqtSignal(str, list)           # agent_id, monitors_list
@@ -590,6 +591,8 @@ class AgentServer(QObject):
                         f"(백그라운드 P2P 업그레이드 5초 후 시작)")
             self.agent_connected.emit(agent_id, conn.ip_public or "relay")
             self.connection_mode_changed.emit(agent_id, "relay")
+            # 에이전트에 시스템 정보 요청 (DB 없이도 정보 표시 가능)
+            self._send_to_agent(agent_id, {'type': 'request_info'})
             # 백그라운드 P2P 업그레이드 (5초 후 시작, 주기적 재시도)
             asyncio.ensure_future(self._delayed_p2p_upgrade(agent_id, delay=5))
             return
@@ -989,6 +992,8 @@ class AgentServer(QObject):
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, msg.get('ip', ''))
                     self.connection_mode_changed.emit(agent_id, "relay")
+                    # 에이전트에 시스템 정보 요청 (하드웨어 등)
+                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} (릴레이)")
             return
 
@@ -1020,6 +1025,8 @@ class AgentServer(QObject):
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, real_ip or '')
                     self.connection_mode_changed.emit(agent_id, "relay")
+                    # 에이전트에 시스템 정보 요청
+                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     if real_ip and not conn._upgrading:
                         # 즉시 WAN 업그레이드 + 실패 시 주기적 재시도
                         asyncio.ensure_future(self._delayed_p2p_upgrade(agent_id, delay=3))
@@ -1079,6 +1086,33 @@ class AgentServer(QObject):
             stderr = msg.get('stderr', '')
             returncode = msg.get('returncode', -1)
             self.command_result.emit(agent_id, command, stdout if stdout else stderr, returncode)
+        elif msg_type == 'system_info':
+            # 에이전트가 보낸 시스템 정보 (릴레이 경유)
+            conn = self._connections.get(agent_id)
+            if conn:
+                info_data = {
+                    'hostname': msg.get('hostname', ''),
+                    'os_info': msg.get('os_info', ''),
+                    'ip': msg.get('ip', ''),
+                    'ip_public': msg.get('ip_public', ''),
+                    'mac_address': msg.get('mac_address', ''),
+                    'screen_width': msg.get('screen_width', 0),
+                    'screen_height': msg.get('screen_height', 0),
+                    'agent_version': msg.get('agent_version', ''),
+                    'cpu_model': msg.get('cpu_model', ''),
+                    'cpu_cores': msg.get('cpu_cores', 0),
+                    'ram_gb': msg.get('ram_gb', 0.0),
+                    'motherboard': msg.get('motherboard', ''),
+                    'gpu_model': msg.get('gpu_model', ''),
+                }
+                conn.info.update(info_data)
+                if msg.get('ip_public'):
+                    conn.ip_public = msg['ip_public']
+                logger.info(f"[P2P/Relay] {agent_id} system_info 수신: "
+                            f"hostname={info_data['hostname']}, "
+                            f"ip_public={info_data['ip_public'] or 'N/A'}, "
+                            f"version={info_data['agent_version']}")
+                self.agent_info_received.emit(agent_id, info_data)
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
 

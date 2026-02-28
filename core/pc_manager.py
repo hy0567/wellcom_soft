@@ -58,6 +58,7 @@ class PCManager:
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
         agent_server.thumbnail_received.connect(self._on_thumbnail_received)
         agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
+        agent_server.agent_info_received.connect(self._on_agent_info_received)
 
     # ==================== PC 관리 ====================
 
@@ -481,3 +482,49 @@ class PCManager:
         pc = self.get_pc_by_agent_id(agent_id)
         if pc:
             pc.update_thumbnail(jpeg_data)
+
+    def _on_agent_info_received(self, agent_id: str, info: dict):
+        """에이전트 system_info 수신 → PCInfo 업데이트 (DB 없이도 정보 표시)"""
+        # 매니저 PC 자신이면 무시
+        hostname = info.get('hostname', '')
+        if self._is_manager_pc(agent_id, hostname):
+            return
+
+        pc = self.get_pc_by_agent_id(agent_id)
+        if not pc:
+            return
+
+        with self._lock:
+            # 기본 정보
+            if info.get('hostname'):
+                pc.info.hostname = info['hostname']
+            if info.get('os_info'):
+                pc.info.os_info = info['os_info']
+            if info.get('ip'):
+                pc.info.ip = info['ip']
+            if info.get('ip_public'):
+                pc.info.public_ip = info['ip_public']
+            if info.get('mac_address'):
+                pc.info.mac_address = info['mac_address']
+            if info.get('screen_width'):
+                pc.info.screen_width = info['screen_width']
+            if info.get('screen_height'):
+                pc.info.screen_height = info['screen_height']
+            if info.get('agent_version'):
+                pc.info.agent_version = info['agent_version']
+            # 하드웨어 정보
+            if info.get('cpu_model'):
+                pc.info.cpu_model = info['cpu_model']
+            if info.get('cpu_cores'):
+                pc.info.cpu_cores = info['cpu_cores']
+            if info.get('ram_gb'):
+                pc.info.ram_gb = info['ram_gb']
+            if info.get('motherboard'):
+                pc.info.motherboard = info['motherboard']
+            if info.get('gpu_model'):
+                pc.info.gpu_model = info['gpu_model']
+
+        self.signals.device_status_changed.emit(pc.name)
+        logger.info(f"PC 정보 업데이트: {pc.name} (agent_id={agent_id}, "
+                    f"hostname={info.get('hostname', '')}, "
+                    f"version={info.get('agent_version', '')})")
