@@ -47,6 +47,7 @@ a = Analysis(
         (str(project_path / 'agent' / 'file_receiver.py'), 'app'),
         (str(project_path / 'agent' / 'version.py'), 'app'),
         (str(project_path / 'agent' / 'h264_encoder.py'), 'app'),
+        (str(project_path / 'agent' / 'upnp_helper.py'), 'app'),
         # core 모듈 (UDP P2P 홀펀칭용)
         (str(project_path / 'core' / '__init__.py'), 'app/core'),
         (str(project_path / 'core' / 'stun_client.py'), 'app/core'),

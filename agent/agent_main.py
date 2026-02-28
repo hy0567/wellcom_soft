@@ -733,44 +733,50 @@ class WellcomAgent:
         return info
 
     def _setup_upnp(self) -> bool:
-        """UPnP로 WS 포트 자동 개방 (TCP+UDP, 검증 포함)"""
+        """UPnP로 WS 포트 자동 개방 (TCP+UDP)
+
+        miniupnpc 우선 시도 → 실패 시 순수 Python UPnP 폴백.
+        """
+        # 1차: miniupnpc (C 라이브러리, 호환성 높음)
+        if self._setup_upnp_miniupnpc():
+            return True
+
+        # 2차: 순수 Python UPnP (외부 패키지 불필요)
+        return self._setup_upnp_pure()
+
+    def _setup_upnp_miniupnpc(self) -> bool:
+        """miniupnpc 라이브러리를 사용한 UPnP"""
         try:
             import miniupnpc
         except ImportError:
-            logger.warning("[UPnP] miniupnpc 미설치 — pip install miniupnpc")
+            logger.debug("[UPnP] miniupnpc 미설치 — 순수 Python 폴백 시도")
             return False
 
         try:
             upnp = miniupnpc.UPnP()
-            upnp.discoverdelay = 2000  # 느린 라우터 대응 (2초)
+            upnp.discoverdelay = 2000
             discovered = upnp.discover()
             if not discovered:
-                logger.warning("[UPnP] 라우터 발견 실패 (discover=0) — "
-                               "UPnP 미지원 또는 비활성화된 라우터")
+                logger.info("[UPnP/miniupnpc] 라우터 발견 실패")
                 return False
 
             try:
                 upnp.selectigd()
             except Exception as e:
-                logger.warning(f"[UPnP] IGD 선택 실패: {type(e).__name__}: {e} — "
-                               "라우터가 UPnP IGD를 지원하지 않음")
+                logger.info(f"[UPnP/miniupnpc] IGD 선택 실패: {e}")
                 return False
 
             local_ip = self._local_ip
-            protocols = ['TCP', 'UDP']
             success_count = 0
 
-            for proto in protocols:
+            for proto in ['TCP', 'UDP']:
                 try:
                     upnp.addportmapping(
                         self._ws_port, proto, local_ip, self._ws_port,
                         'WellcomAgent', ''
                     )
                     success_count += 1
-                    logger.info(f"[UPnP] {proto} 포트 {self._ws_port} 매핑 추가 성공")
-                except Exception as e1:
-                    # 기존 매핑 충돌 → 삭제 후 재시도
-                    logger.debug(f"[UPnP] {proto} 매핑 첫 시도 실패 ({e1}) — 삭제 후 재시도")
+                except Exception:
                     try:
                         upnp.deleteportmapping(self._ws_port, proto)
                         upnp.addportmapping(
@@ -778,22 +784,11 @@ class WellcomAgent:
                             'WellcomAgent', ''
                         )
                         success_count += 1
-                        logger.info(f"[UPnP] {proto} 포트 {self._ws_port} 매핑 재시도 성공")
                     except Exception as e2:
-                        logger.warning(f"[UPnP] {proto} 포트 매핑 최종 실패: "
-                                       f"{type(e2).__name__}: {e2}")
+                        logger.debug(f"[UPnP/miniupnpc] {proto} 매핑 실패: {e2}")
 
             if success_count == 0:
-                logger.warning("[UPnP] TCP/UDP 모두 매핑 실패")
                 return False
-
-            # 매핑 검증 (TCP)
-            try:
-                mapping = upnp.getspecificportmapping(self._ws_port, 'TCP')
-                if not mapping:
-                    logger.info("[UPnP] TCP 매핑 검증 실패 (라우터가 매핑을 거부했을 수 있음)")
-            except Exception:
-                pass  # 검증 실패해도 매핑 자체는 성공일 수 있음
 
             external_ip = upnp.externalipaddress()
             if external_ip:
@@ -801,12 +796,50 @@ class WellcomAgent:
                 self._upnp_external_ip = external_ip
             self._upnp = upnp
             self._upnp_ok = True
-            logger.info(f"[UPnP] 포트 {self._ws_port} 개방 성공 "
-                         f"({success_count}/{len(protocols)} 프로토콜), 공인IP: {external_ip}")
+            logger.info(f"[UPnP/miniupnpc] 포트 {self._ws_port} 개방 성공 "
+                         f"({success_count}/2), 공인IP: {external_ip}")
             return True
         except Exception as e:
-            logger.warning(f"[UPnP] 포트 개방 실패: {type(e).__name__}: {e}")
+            logger.debug(f"[UPnP/miniupnpc] 실패: {e}")
             return False
+
+    def _setup_upnp_pure(self) -> bool:
+        """순수 Python UPnP 클라이언트 (외부 패키지 불필요)"""
+        try:
+            from upnp_helper import upnp_add_port_mapping, upnp_get_external_ip
+        except ImportError:
+            logger.warning("[UPnP-Pure] upnp_helper 모듈 로드 실패")
+            return False
+
+        local_ip = self._local_ip
+        success_count = 0
+        ext_ip = ''
+
+        for proto in ['TCP', 'UDP']:
+            ok, ip = upnp_add_port_mapping(
+                self._ws_port, proto, local_ip,
+                description='WellcomAgent'
+            )
+            if ok:
+                success_count += 1
+                if ip:
+                    ext_ip = ip
+                logger.info(f"[UPnP-Pure] {proto} 포트 {self._ws_port} 매핑 성공")
+            else:
+                logger.info(f"[UPnP-Pure] {proto} 포트 {self._ws_port} 매핑 실패")
+
+        if success_count == 0:
+            logger.warning("[UPnP-Pure] TCP/UDP 모두 매핑 실패 — "
+                           "라우터 UPnP 비활성화 또는 미지원")
+            return False
+
+        if ext_ip:
+            self._public_ip = ext_ip
+            self._upnp_external_ip = ext_ip
+        self._upnp_ok = True
+        logger.info(f"[UPnP-Pure] 포트 {self._ws_port} 개방 성공 "
+                     f"({success_count}/2), 공인IP: {ext_ip}")
+        return True
 
     def _setup_natpmp(self) -> bool:
         """NAT-PMP로 포트 매핑 (UPnP 실패 시 폴백, 외부 패키지 불필요)
