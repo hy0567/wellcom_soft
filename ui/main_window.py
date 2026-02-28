@@ -232,15 +232,7 @@ class MainWindow(QMainWindow):
         self.action_settings.triggered.connect(self._open_settings)
         toolbar.addAction(self.action_settings)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("  컬럼: "))
-        self._col_spin = QSpinBox()
-        self._col_spin.setRange(3, 20)
-        self._col_spin.setValue(settings.get('grid_view.columns', 5))
-        self._col_spin.setFixedWidth(55)
-        self._col_spin.setToolTip("한 줄에 표시할 PC 수 (3~20)")
-        self._col_spin.valueChanged.connect(self._on_columns_changed)
-        toolbar.addWidget(self._col_spin)
+        # 컬럼/비율/폰트 설정은 GridView 설정 바에서 조절
 
     def _create_tree(self):
         self.tree = QTreeWidget()
@@ -407,10 +399,6 @@ class MainWindow(QMainWindow):
         remove_action.triggered.connect(lambda: self._remove_pc(pc_name))
         menu.exec(pos)
 
-    def _on_columns_changed(self, value: int):
-        """툴바 컬럼 스피너 변경 → 그리드 즉시 재구성"""
-        settings.set('grid_view.columns', value)
-        self.grid_view.rebuild_grid()
 
     def _show_pc_info(self, pc_name: str):
         """PC 정보 팝업 표시"""

@@ -87,16 +87,22 @@ class Settings:
         },
         'screen': {
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
-            'stream_fps': 30,             # 전체 화면 스트리밍 FPS (LinkIO 수준)
-            'stream_quality': 80,         # 스트리밍 JPEG/H.264 품질 (1-100)
-            'thumbnail_quality': 50,      # 썸네일 JPEG 품질 (40→50 개선)
-            'thumbnail_width': 480,       # 썸네일 최대 너비 (320→480 개선)
+            'stream_fps': 30,             # 전체 화면 스트리밍 FPS
+            'stream_quality': 90,         # 스트리밍 품질 (1-100, 높을수록 선명)
+            'stream_codec': 'h264',       # 코덱 (h264=고화질 저대역폭, mjpeg=호환성)
+            'keyframe_interval': 60,      # H.264 키프레임 간격 (프레임 수)
+            'thumbnail_quality': 50,      # 썸네일 JPEG 품질
+            'thumbnail_width': 480,       # 썸네일 최대 너비
         },
         'grid_view': {
             'columns': 5,                 # 기본 5컬럼 (LinkIO 기준)
             'scale_factor': 100,          # 축척 (%)
             'show_title': True,           # 타이틀 표시
             'frame_speed': 5,             # 그리드 FPS
+            'aspect_ratio': '16:9',       # 썸네일 비율
+            'font_size': 9,              # 썸네일 폰트 크기 (5~16)
+            'show_name': True,           # PC 이름 표시
+            'show_memo': True,           # 메모 표시
         },
         'multi_control': {
             'random_pos_x': 3,            # 랜덤 좌표 오프셋 X (px)
@@ -119,7 +125,7 @@ class Settings:
             'key_16': '', 'key_17': '', 'key_18': '', 'key_19': '', 'key_20': '',
         },
         'general': {
-            'theme': 'dark',              # dark / light
+            'theme': 'light',             # dark / light
             'language': 'ko',
             'start_minimized': False,
             'confirm_delete': True
@@ -166,9 +172,9 @@ class Settings:
         changed = False
         screen = self._data.get('screen', {})
 
-        # v3.2.4 이전: stream_quality=60, stream_fps=15 → 80, 30
-        if screen.get('stream_quality', 0) <= 60:
-            screen['stream_quality'] = 80
+        # v3.2.4 이전: stream_quality=60 → 90, stream_fps=15 → 30
+        if screen.get('stream_quality', 0) <= 80:
+            screen['stream_quality'] = 90
             changed = True
         if screen.get('stream_fps', 0) <= 15:
             screen['stream_fps'] = 30
