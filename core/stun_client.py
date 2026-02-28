@@ -170,3 +170,79 @@ async def stun_discover(sock: socket.socket,
 
     logger.warning("[STUN] 모든 STUN 서버 실패")
     return None
+
+
+async def stun_detect_nat_type(sock: socket.socket,
+                                timeout: float = 2.0
+                                ) -> tuple[str, tuple[str, int], tuple[str, int] | None]:
+    """같은 소켓으로 2개의 STUN 서버에 질의하여 NAT 타입 감지.
+
+    포트가 동일하면 non-symmetric (홀펀칭 가능),
+    포트가 다르면 symmetric NAT (포트 예측 필요).
+
+    Args:
+        sock: 바인딩된 UDP 소켓 (non-blocking)
+        timeout: 각 STUN 서버 응답 대기 시간
+
+    Returns:
+        (nat_type, endpoint1, endpoint2)
+        nat_type: "full_cone" | "symmetric" | "unknown"
+        endpoint1: (ip, port) — 첫 번째 STUN 결과
+        endpoint2: (ip, port) | None — 두 번째 STUN 결과
+    """
+    loop = asyncio.get_event_loop()
+    results: list[tuple[str, int]] = []
+
+    # 서로 다른 STUN 서버 2개 사용 (같은 소켓에서)
+    server_pairs = [
+        ('stun.l.google.com', 19302),
+        ('stun.cloudflare.com', 3478),
+        ('stun1.l.google.com', 19302),
+    ]
+
+    for host, port in server_pairs:
+        if len(results) >= 2:
+            break
+
+        packet, txn_id = _build_binding_request()
+        try:
+            addr_info = await loop.getaddrinfo(host, port,
+                                                family=socket.AF_INET,
+                                                type=socket.SOCK_DGRAM)
+            if not addr_info:
+                continue
+            server_addr = addr_info[0][4]
+
+            sock.sendto(packet, server_addr)
+
+            try:
+                data = await asyncio.wait_for(
+                    loop.sock_recv(sock, 1024), timeout=timeout)
+            except asyncio.TimeoutError:
+                continue
+
+            result = _parse_binding_response(data, txn_id)
+            if result:
+                results.append(result)
+                logger.debug(f"[STUN-NAT] {host}: {result[0]}:{result[1]}")
+
+        except Exception:
+            continue
+
+    if len(results) == 0:
+        return ("unknown", ("", 0), None)
+    if len(results) == 1:
+        return ("unknown", results[0], None)
+
+    ip1, port1 = results[0]
+    ip2, port2 = results[1]
+
+    if ip1 == ip2 and port1 == port2:
+        nat_type = "full_cone"
+    else:
+        nat_type = "symmetric"
+
+    logger.info(f"[STUN-NAT] NAT 타입: {nat_type} "
+                f"(ep1={ip1}:{port1}, ep2={ip2}:{port2})")
+
+    return (nat_type, results[0], results[1])

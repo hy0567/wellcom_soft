@@ -592,6 +592,18 @@ class AgentServer(QObject):
             conn._connecting = False
             return
 
+        # 릴레이 연결 대기 (릴레이가 아직 접속 안 된 경우 최대 3초 대기)
+        if not self._relay_ws:
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if self._relay_ws or conn.mode != ConnectionMode.DISCONNECTED:
+                    break
+
+        # 릴레이 핸들러가 이미 연결했으면 스킵
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
+            return
+
         # 2단계: UDP 홀펀칭 P2P (포트포워딩 불필요)
         if self._relay_ws:
             udp_ch = await self._try_udp_punch(agent_id)
@@ -1089,7 +1101,7 @@ class AgentServer(QObject):
             from .udp_punch import punch_as_manager
             logger.info(f"[UDP-Punch] {agent_id} 홀펀칭 시도...")
             channel = await punch_as_manager(
-                self._relay_ws, agent_id, timeout=8.0
+                self._relay_ws, agent_id, timeout=10.0
             )
             return channel
         except Exception as e:

@@ -111,8 +111,7 @@ class MainWindow(QMainWindow):
         # 파일
         file_menu = menubar.addMenu("파일(&F)")
         quit_action = QAction("종료(&Q)", self)
-        quit_action.setShortcut("Ctrl+Q")
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self._tray_quit)
         file_menu.addAction(quit_action)
 
         # PC

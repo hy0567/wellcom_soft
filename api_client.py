@@ -202,6 +202,16 @@ class APIClient:
         except Exception:
             return False
 
+    def rename_agent_by_agent_id(self, agent_id: str, display_name: str) -> bool:
+        """agent_id(hostname)로 에이전트 표시 이름 변경"""
+        try:
+            self._put(f'/api/agents/by-agent-id/{agent_id}/name',
+                      params={'display_name': display_name})
+            return True
+        except Exception as e:
+            logger.warning(f"서버 이름 변경 실패 ({agent_id}): {e}")
+            return False
+
 
 # 싱글톤 인스턴스
 api_client = APIClient()

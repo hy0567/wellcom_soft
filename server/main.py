@@ -106,7 +106,7 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
     _relay_agent_info[agent_id] = {"real_ip": agent_real_ip, "ws_port": agent_ws_port}
     await websocket.send_text(json.dumps({"type": "relay_ok"}))
 
-    # DB에 에이전트의 실제 공인IP 업데이트 (ip_public이 비어있으면 채워줌)
+    # DB에 에이전트의 실제 공인IP 항상 업데이트 (릴레이 접속 시 최신 IP 반영)
     if agent_real_ip:
         try:
             owner_id = payload.get("user_id") or payload.get("sub")
@@ -116,7 +116,6 @@ async def ws_agent_relay(websocket: WebSocket, token: str = Query(default="")):
                         cur.execute("""
                             UPDATE agents SET ip_public = %s
                             WHERE agent_id = %s AND owner_id = %s
-                              AND (ip_public IS NULL OR ip_public = '')
                         """, (agent_real_ip, agent_id, owner_id))
                         if cur.rowcount:
                             print(f"[Relay] DB ip_public 업데이트: {agent_id} → {agent_real_ip}")
@@ -572,7 +571,15 @@ def get_my_agents(user: dict = Depends(get_current_user)):
                 """, (user["id"],))
             agents = cur.fetchall()
 
-    return [_agent_to_response(a) for a in agents]
+    result = []
+    for a in agents:
+        # relay로 접속 중인 에이전트의 공인IP가 비어있으면 relay real_ip로 채움
+        aid = a.get("agent_id", "")
+        if aid and not a.get("ip_public") and aid in _relay_agent_info:
+            a = dict(a)
+            a["ip_public"] = _relay_agent_info[aid].get("real_ip", "")
+        result.append(_agent_to_response(a))
+    return result
 
 
 @app.get("/api/agents/{agent_db_id}", response_model=AgentResponse)
@@ -644,6 +651,28 @@ def rename_agent(agent_db_id: int, display_name: str = Query(...),
             cur.execute(
                 "UPDATE agents SET display_name = %s WHERE id = %s",
                 (display_name, agent_db_id),
+            )
+    return {"status": "ok"}
+
+
+@app.put("/api/agents/by-agent-id/{agent_id}/name")
+def rename_agent_by_agent_id(agent_id: str, display_name: str = Query(...),
+                              user: dict = Depends(get_current_user)):
+    """agent_id(hostname)로 에이전트 표시 이름 변경"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, owner_id FROM agents WHERE agent_id = %s",
+                (agent_id,),
+            )
+            agent = cur.fetchone()
+            if not agent:
+                raise HTTPException(status_code=404, detail="Agent not found")
+            if user["role"] != "admin" and agent["owner_id"] != user["id"]:
+                raise HTTPException(status_code=403)
+            cur.execute(
+                "UPDATE agents SET display_name = %s WHERE id = %s",
+                (display_name, agent["id"]),
             )
     return {"status": "ok"}
 

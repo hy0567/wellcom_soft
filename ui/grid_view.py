@@ -233,22 +233,29 @@ class PCThumbnailWidget(QFrame):
             return
 
         display = 'v?' if agent_version == '0.0.0' else f'v{agent_version}'
-        self.version_label.setText(display)
         needs_update = False
-        if manager_version:
+        is_latest = False
+        if manager_version and agent_version != '0.0.0':
             try:
                 av = tuple(int(x) for x in agent_version.split('.'))
                 mv = tuple(int(x) for x in manager_version.split('.'))
                 needs_update = av < mv
+                is_latest = av >= mv
             except Exception:
                 pass
+
+        if is_latest:
+            display += ' ✓'
+        self.version_label.setText(display)
 
         if needs_update:
             self.version_label.setStyleSheet(
                 "color: #e74c3c; font-weight: bold; background: transparent;"
             )
-        else:
+        elif is_latest:
             self.version_label.setStyleSheet("color: #2ecc71; background: transparent;")
+        else:
+            self.version_label.setStyleSheet("color: #888; background: transparent;")
         self.update_btn.setVisible(needs_update)
 
     def set_update_status(self, status: str, **kwargs):
@@ -628,6 +635,11 @@ class GridView(QWidget):
         pc = self.pc_manager.get_pc(pc_name)
         if thumb and pc:
             thumb.set_status(pc.status)
+            # 상태 변경 시 버전 라벨도 갱신 (업데이트 후 재접속 반영)
+            agent_version = getattr(pc.info, 'agent_version', '')
+            if not agent_version and pc.is_online:
+                agent_version = '0.0.0'
+            thumb.update_version(agent_version, MANAGER_VERSION)
 
     def _on_thumbnail_received(self, agent_id: str, jpeg_data: bytes):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
@@ -637,11 +649,19 @@ class GridView(QWidget):
                 thumb.update_thumbnail(jpeg_data)
 
     def _on_agent_connected(self, agent_id: str, agent_ip: str):
-        """에이전트 연결 시 push 모드 시작"""
+        """에이전트 연결 시 push 모드 시작 + 버전 갱신"""
         push_interval = settings.get('screen.thumbnail_interval', 1000) / 1000.0
         push_interval = max(0.2, min(push_interval, 5.0))
         self.agent_server.start_thumbnail_push(agent_id, push_interval)
         self._push_agents.add(agent_id)
+
+        # 연결 시 버전 라벨 즉시 갱신 (업데이트 후 재접속 반영)
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            thumb = self._thumbnails.get(pc.name)
+            if thumb:
+                agent_version = getattr(pc.info, 'agent_version', '') or '0.0.0'
+                thumb.update_version(agent_version, MANAGER_VERSION)
 
     def _on_agent_disconnected(self, agent_id: str):
         self._push_agents.discard(agent_id)
@@ -706,6 +726,8 @@ class GridView(QWidget):
             if thumb:
                 thumb.update_latency(ms)
 
+    _last_update_log: dict = {}  # 클래스 변수: 에이전트별 마지막 로그 상태
+
     def _on_update_status(self, agent_id: str, status_dict: dict):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
         if not pc:
@@ -714,7 +736,13 @@ class GridView(QWidget):
         if not thumb:
             return
         status = status_dict.get('status', '')
-        logger.info(f"[업데이트] {pc.name} 상태: {status}")
+        # downloading 상태는 진행률 변경 시에만 로그
+        prev = self._last_update_log.get(agent_id)
+        pct = status_dict.get('progress', 0)
+        if status != 'downloading' or prev != pct:
+            logger.info(f"[업데이트] {pc.name} 상태: {status}"
+                        + (f" ({pct}%)" if status == 'downloading' else ""))
+            self._last_update_log[agent_id] = pct
         thumb.set_update_status(status, **{
             k: v for k, v in status_dict.items() if k != 'type' and k != 'status'
         })

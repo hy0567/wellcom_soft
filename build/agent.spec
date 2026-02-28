@@ -70,6 +70,7 @@ a = Analysis(
         'tkinter.ttk',
         'tkinter.simpledialog',
         'tkinter.messagebox',
+        'miniupnpc',
         'av',
         'av.codec',
         'av.video',

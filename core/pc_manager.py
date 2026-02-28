@@ -302,19 +302,29 @@ class PCManager:
         return True
 
     def rename_pc(self, old_name: str, new_name: str) -> bool:
-        """PC 이름 변경"""
+        """PC 이름 변경 (로컬 DB + 서버 동기화)"""
         with self._lock:
             if old_name not in self.pcs or new_name in self.pcs:
                 return False
 
             pc = self.pcs.pop(old_name)
+            agent_id = pc.agent_id
             pc.name = new_name
             self.pcs[new_name] = pc
 
-            # DB 업데이트
+            # 로컬 DB 업데이트
             db_row = self.db.get_pc_by_name(old_name)
             if db_row:
                 self.db.update_pc(db_row['id'], name=new_name)
+
+        # 서버 동기화 (display_name 업데이트)
+        try:
+            from api_client import api_client
+            if api_client.is_logged_in and agent_id:
+                api_client.rename_agent_by_agent_id(agent_id, new_name)
+                logger.info(f"서버 이름 동기화: {old_name} → {new_name} ({agent_id})")
+        except Exception as e:
+            logger.warning(f"서버 이름 동기화 실패: {e}")
 
         self.signals.device_renamed.emit(old_name, new_name)
         return True

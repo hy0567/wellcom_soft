@@ -70,8 +70,9 @@ def _auto_install_packages():
         return  # PyInstaller 빌드 — pip 불필요
 
     packages = [
-        ('av', 'av'),         # PyAV — H.264 인코딩
-        ('numpy', 'numpy'),   # numpy — 프레임 변환
+        ('av', 'av'),              # PyAV — H.264 인코딩
+        ('numpy', 'numpy'),        # numpy — 프레임 변환
+        ('miniupnpc', 'miniupnpc'),  # UPnP — 포트 자동 포워딩
     ]
 
     missing = []
@@ -585,8 +586,9 @@ class WellcomAgent:
         # 오디오 스트리밍
         self._audio_streaming = False
 
-        # UPnP
+        # UPnP / NAT-PMP
         self._upnp = None
+        self._natpmp_gateway = ''
 
         # 연결 상태 플래그 (트레이 아이콘 동적 업데이트용)
         self._relay_connected = False       # 서버 릴레이 연결 여부
@@ -655,21 +657,44 @@ class WellcomAgent:
         return info
 
     def _setup_upnp(self) -> bool:
-        """UPnP로 WS 포트 자동 개방"""
+        """UPnP로 WS 포트 자동 개방 (검증 포함)"""
         try:
             import miniupnpc
             upnp = miniupnpc.UPnP()
-            upnp.discoverdelay = 200
+            upnp.discoverdelay = 1000  # 느린 라우터 대응 (기존 200ms)
             discovered = upnp.discover()
             if not discovered:
-                logger.info("[UPnP] 라우터 발견 실패 — 릴레이로 폴백")
+                logger.info("[UPnP] 라우터 발견 실패")
                 return False
             upnp.selectigd()
             local_ip = self._local_ip
-            upnp.addportmapping(
-                self._ws_port, 'TCP', local_ip, self._ws_port,
-                'WellcomAgent', ''
-            )
+
+            # 포트 매핑 추가 (기존 매핑 충돌 시 삭제 후 재시도)
+            try:
+                upnp.addportmapping(
+                    self._ws_port, 'TCP', local_ip, self._ws_port,
+                    'WellcomAgent', ''
+                )
+            except Exception:
+                try:
+                    upnp.deleteportmapping(self._ws_port, 'TCP')
+                    upnp.addportmapping(
+                        self._ws_port, 'TCP', local_ip, self._ws_port,
+                        'WellcomAgent', ''
+                    )
+                except Exception as e2:
+                    logger.info(f"[UPnP] 포트 매핑 실패: {e2}")
+                    return False
+
+            # 매핑 검증
+            try:
+                mapping = upnp.getspecificportmapping(self._ws_port, 'TCP')
+                if not mapping:
+                    logger.info("[UPnP] 매핑 검증 실패")
+                    return False
+            except Exception:
+                pass  # 검증 실패해도 매핑 자체는 성공일 수 있음
+
             external_ip = upnp.externalipaddress()
             if external_ip:
                 self._public_ip = external_ip
@@ -677,11 +702,69 @@ class WellcomAgent:
             logger.info(f"[UPnP] 포트 {self._ws_port} 개방 성공, 공인IP: {external_ip}")
             return True
         except ImportError:
-            logger.debug("[UPnP] miniupnpc 미설치 — 릴레이로 폴백")
+            logger.debug("[UPnP] miniupnpc 미설치")
             return False
         except Exception as e:
-            logger.info(f"[UPnP] 포트 개방 실패 ({e}) — 릴레이로 폴백")
+            logger.info(f"[UPnP] 포트 개방 실패 ({e})")
             return False
+
+    def _setup_natpmp(self) -> bool:
+        """NAT-PMP로 포트 매핑 (UPnP 실패 시 폴백, 외부 패키지 불필요)"""
+        try:
+            import struct as _struct
+            gateway = self._get_default_gateway()
+            if not gateway:
+                logger.debug("[NAT-PMP] 게이트웨이 조회 실패")
+                return False
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(3)
+
+            # NAT-PMP TCP 매핑 요청 (RFC 6886)
+            # version=0, opcode=2(TCP), reserved=0, internal, external, lifetime=7200
+            request = _struct.pack('!BBHHHHI', 0, 2, 0,
+                                   self._ws_port, self._ws_port, 7200)
+            sock.sendto(request, (gateway, 5351))
+
+            data, _ = sock.recvfrom(64)
+            sock.close()
+
+            if len(data) >= 16:
+                _, _, result_code, _, internal, external, lifetime = \
+                    _struct.unpack('!BBHIHHI', data[:16])
+                if result_code == 0:
+                    self._natpmp_gateway = gateway
+                    logger.info(f"[NAT-PMP] 포트 {self._ws_port}→{external} "
+                                f"매핑 성공 (lifetime={lifetime}s)")
+                    return True
+                else:
+                    logger.debug(f"[NAT-PMP] 거부 (result={result_code})")
+            return False
+        except socket.timeout:
+            logger.debug("[NAT-PMP] 타임아웃 (미지원 라우터)")
+            return False
+        except Exception as e:
+            logger.debug(f"[NAT-PMP] 실패: {e}")
+            return False
+
+    @staticmethod
+    def _get_default_gateway() -> str:
+        """Windows 기본 게이트웨이 IP 조회"""
+        try:
+            result = subprocess.run(
+                ['ipconfig'], capture_output=True, text=True,
+                timeout=5, encoding='cp949', errors='replace',
+            )
+            for line in result.stdout.splitlines():
+                if 'Gateway' in line or '게이트웨이' in line:
+                    parts = line.strip().split(':')
+                    if len(parts) >= 2:
+                        ip = parts[-1].strip()
+                        if ip and '.' in ip:
+                            return ip
+        except Exception:
+            pass
+        return ''
 
     def _cleanup_upnp(self):
         """UPnP 포트 매핑 제거"""
@@ -692,6 +775,23 @@ class WellcomAgent:
             except Exception:
                 pass
             self._upnp = None
+
+    def _cleanup_natpmp(self):
+        """NAT-PMP 포트 매핑 제거"""
+        if self._natpmp_gateway:
+            try:
+                import struct as _struct
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(2)
+                # lifetime=0 → 매핑 삭제
+                request = _struct.pack('!BBHHHHI', 0, 2, 0,
+                                       self._ws_port, 0, 0)
+                sock.sendto(request, (self._natpmp_gateway, 5351))
+                sock.close()
+                logger.info("[NAT-PMP] 매핑 제거")
+            except Exception:
+                pass
+            self._natpmp_gateway = ''
 
     @staticmethod
     def _add_firewall_rule(ws_port: int):
@@ -981,8 +1081,9 @@ class WellcomAgent:
         self._public_ip = _get_public_ip()
         logger.info(f"사설IP: {self._local_ip}, 공인IP: {self._public_ip or '조회 실패'}")
 
-        # 2. UPnP 포트 자동 개방 (성공 시 공인IP 갱신)
-        self._setup_upnp()
+        # 2. 포트 자동 개방: UPnP → NAT-PMP 폴백 (성공 시 공인IP 갱신)
+        if not self._setup_upnp():
+            self._setup_natpmp()
 
         # 2-b. Windows 방화벽 인바운드 규칙 추가 (P2P LAN/WAN용)
         self._add_firewall_rule(self._ws_port)
@@ -1023,6 +1124,7 @@ class WellcomAgent:
             if self.api_client:
                 self.api_client.report_offline(self._agent_id)
             self._cleanup_upnp()
+            self._cleanup_natpmp()
             self.clipboard.stop_monitoring()
             self.screen_capture.close()
 
@@ -1393,14 +1495,16 @@ class WellcomAgent:
     async def _handle_udp_offer(self, relay_ws, msg: dict):
         """매니저의 UDP 홀펀칭 요청 처리.
 
-        1. UDP 소켓 생성 + STUN 탐지
-        2. udp_answer 응답 (릴레이 경유)
-        3. 홀펀칭 실행
+        1. UDP 소켓 생성 + STUN + NAT 타입 감지
+        2. udp_answer 응답 (릴레이 경유, NAT 정보 포함)
+        3. 홀펀칭 실행 (피어 NAT 정보 활용)
         4. 성공 시 UDP 채널 저장 + 어댑터 설정
         """
         punch_token_hex = msg.get('punch_token', '')
         peer_ip = msg.get('udp_ip', '')
         peer_port = msg.get('udp_port', 0)
+        peer_nat_type = msg.get('nat_type', 'unknown')
+        peer_port2 = msg.get('udp_port2', 0)
 
         if not punch_token_hex or not peer_ip or not peer_port:
             logger.warning("[UDP-Punch] 잘못된 udp_offer")
@@ -1415,38 +1519,53 @@ class WellcomAgent:
                 if p not in _sys.path:
                     _sys.path.insert(0, p)
 
-            from core.stun_client import stun_discover
+            from core.stun_client import stun_detect_nat_type, stun_discover
             from core.udp_punch import punch_as_agent, _create_udp_socket
             from core.udp_channel import UdpChannel
 
-            # 1. UDP 소켓 생성 + STUN 탐지
+            # 1. UDP 소켓 생성 + STUN + NAT 타입 감지
             sock = _create_udp_socket()
             local_port = sock.getsockname()[1]
             logger.info(f"[UDP-Punch] STUN 탐지 시작 (로컬 포트: {local_port})")
 
-            stun_result = await stun_discover(sock, timeout=3.0)
-            if not stun_result:
-                logger.warning("[UDP-Punch] STUN 탐지 실패")
-                sock.close()
-                return
+            nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=2.0)
 
-            my_ip, my_port = stun_result
-            logger.info(f"[UDP-Punch] 내 공인 엔드포인트: {my_ip}:{my_port}")
+            if not endpoint1 or not endpoint1[0]:
+                # NAT 타입 감지 실패 → 기존 방식 폴백
+                stun_result = await stun_discover(sock, timeout=3.0)
+                if not stun_result:
+                    logger.warning("[UDP-Punch] STUN 탐지 실패")
+                    sock.close()
+                    return
+                my_ip, my_port = stun_result
+                nat_type = "unknown"
+                my_port2 = my_port
+            else:
+                my_ip, my_port = endpoint1
+                my_port2 = endpoint2[1] if endpoint2 else my_port
 
-            # 2. udp_answer 응답 (릴레이 경유)
+            logger.info(f"[UDP-Punch] 내 공인 엔드포인트: {my_ip}:{my_port} "
+                         f"(NAT: {nat_type}, port2={my_port2})")
+
+            # 2. udp_answer 응답 (릴레이 경유, NAT 정보 포함)
             answer = json.dumps({
                 'type': 'udp_answer',
                 'source_agent': self._agent_id,
                 'udp_ip': my_ip,
                 'udp_port': my_port,
                 'punch_token': punch_token_hex,
+                'nat_type': nat_type,
+                'udp_port2': my_port2,
             })
             await relay_ws.send(answer)
             logger.info(f"[UDP-Punch] udp_answer 전송 ({my_ip}:{my_port})")
 
-            # 3. 홀펀칭 실행
+            # 3. 홀펀칭 실행 (피어 NAT 정보 전달)
             punch_token = bytes.fromhex(punch_token_hex)
-            channel = await punch_as_agent(sock, peer_ip, peer_port, punch_token)
+            channel = await punch_as_agent(
+                sock, peer_ip, peer_port, punch_token,
+                peer_nat_type=peer_nat_type, peer_port2=peer_port2,
+            )
 
             if channel:
                 # 4. UDP 채널 활성화
