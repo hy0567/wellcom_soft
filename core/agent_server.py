@@ -593,11 +593,42 @@ class AgentServer(QObject):
             return
 
         # 릴레이 연결 대기 (릴레이가 아직 접속 안 된 경우 최대 3초 대기)
-        if not self._relay_ws:
+        # relay가 연결되면 agent_connected로 ip_public이 설정됨 → WAN 재시도 가능
+        if not self._relay_ws or not conn.ip_public:
             for _ in range(30):
                 await asyncio.sleep(0.1)
-                if self._relay_ws or conn.mode != ConnectionMode.DISCONNECTED:
+                if conn.mode != ConnectionMode.DISCONNECTED:
                     break
+                # relay 연결 + ip_public 수신 완료 → WAN 재시도로 빠르게 진행
+                if self._relay_ws and conn.ip_public:
+                    break
+
+        # 릴레이 핸들러가 이미 연결했으면 스킵
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
+            return
+
+        # 1-B단계: WAN 재시도 (relay에서 공인IP를 수신한 경우)
+        if conn.ip_public:
+            logger.info(f"[P2P] {agent_id} 1-B WAN 재시도 "
+                        f"(relay에서 공인IP 수신): {conn.ip_public}:{conn.ws_port}")
+            result = await self._try_p2p_connect(
+                f"ws://{conn.ip_public}:{conn.ws_port}",
+                timeout=self._timeout_wan,
+            )
+            if result:
+                ws, auth_info = result
+                conn.ws = ws
+                conn.mode = ConnectionMode.WAN
+                conn.info = auth_info
+                conn._connecting = False
+                logger.info(f"[P2P] {agent_id} ★ WAN 연결 성공 (relay IP): "
+                            f"{conn.ip_public}:{conn.ws_port}")
+                self.agent_connected.emit(agent_id, conn.ip_public)
+                self.connection_mode_changed.emit(agent_id, "wan")
+                conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                return
+            logger.info(f"[P2P] {agent_id} WAN 재시도 실패 (포트 미개방 또는 NAT)")
 
         # 릴레이 핸들러가 이미 연결했으면 스킵
         if conn.mode != ConnectionMode.DISCONNECTED:
@@ -995,9 +1026,9 @@ class AgentServer(QObject):
                     conn.ws_port = ws_port
 
                 if conn._connecting:
-                    # _connect_cascade 실행 중 — IP만 업데이트하고 중복 시도 안 함
-                    logger.debug(f"[P2P/Relay] {agent_id} IP 업데이트 (cascade 진행 중): "
-                                 f"real_ip={real_ip or 'N/A'}")
+                    # _connect_cascade 실행 중 — IP만 업데이트 (cascade가 대기 후 WAN 재시도함)
+                    logger.info(f"[P2P/Relay] {agent_id} 공인IP 수신 (cascade 대기 중 → WAN 재시도 예정): "
+                                f"real_ip={real_ip or 'N/A'}, ws_port={ws_port}")
                 elif conn.mode == ConnectionMode.DISCONNECTED:
                     # 새 에이전트 — 릴레이 설정 + P2P 업그레이드 시도
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} "
