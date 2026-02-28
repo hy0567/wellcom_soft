@@ -214,7 +214,9 @@ class AgentServer(QObject):
             logger.debug(f"[P2P] {agent_id} cascade 이미 진행 중 — IP 업데이트만")
             return
 
-        # cascade 시작
+        # ★ cascade 스케줄 전에 _connecting 플래그 설정 (레이스 컨디션 방지)
+        # 이렇게 하면 릴레이 핸들러가 cascade 실행 전에 RELAY를 설정하지 않음
+        conn._connecting = True
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self._connect_cascade(agent_id), self._loop
@@ -566,15 +568,23 @@ class AgentServer(QObject):
         if not conn:
             return
 
-        # 이미 연결됨 또는 다른 cascade 실행 중
-        if conn.mode != ConnectionMode.DISCONNECTED or conn._connecting:
+        # 이미 연결됨 → cascade 불필요
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
             return
 
-        conn._connecting = True
+        # _connecting은 connect_to_agent()에서 이미 True로 설정됨
         logger.info(f"[P2P] {agent_id} 연결 시도 시작 ("
                      f"WAN={conn.ip_public or 'N/A'}, port={conn.ws_port})")
 
         # 1단계: WAN (ip1) 직접 연결
+        # 공인IP가 아직 없으면 릴레이 핸들러가 agent_connected로 보내줄 때까지 최대 2초 대기
+        if not conn.ip_public:
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if conn.ip_public or conn.mode != ConnectionMode.DISCONNECTED:
+                    break
+
         if conn.ip_public:
             logger.info(f"[P2P] {agent_id} 1단계 WAN 시도: {conn.ip_public}:{conn.ws_port}")
             result = await self._try_p2p_connect(
@@ -591,6 +601,8 @@ class AgentServer(QObject):
                 self.agent_connected.emit(agent_id, conn.ip_public)
                 self.connection_mode_changed.emit(agent_id, "wan")
                 conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                # WAN 직접 연결에서도 시스템 정보 요청
+                self._send_to_agent(agent_id, {'type': 'request_info'})
                 return
             logger.info(f"[P2P] {agent_id} WAN 연결 실패 (포트 미개방 또는 NAT)")
         else:
@@ -628,6 +640,8 @@ class AgentServer(QObject):
                 )
                 self.agent_connected.emit(agent_id, conn.ip_public or "udp_p2p")
                 self.connection_mode_changed.emit(agent_id, "udp_p2p")
+                # UDP P2P에서도 시스템 정보 요청
+                self._send_to_agent(agent_id, {'type': 'request_info'})
                 return
 
         # 릴레이 핸들러가 이미 연결했으면 스킵
@@ -841,7 +855,10 @@ class AgentServer(QObject):
                 logger.info(f"[P2P] {agent_id} {self._reconnect_interval}초 후 재연결...")
                 await asyncio.sleep(self._reconnect_interval)
                 if not self._stop_event.is_set():
-                    await self._connect_cascade(agent_id)
+                    conn = self._connections.get(agent_id)
+                    if conn and not conn._connecting:
+                        conn._connecting = True
+                        await self._connect_cascade(agent_id)
 
     def _handle_p2p_text(self, agent_id: str, raw: str):
         """P2P 직접 연결 JSON 처리 (agent_id prefix 불필요 — 직접 연결)"""

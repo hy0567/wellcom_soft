@@ -120,6 +120,11 @@ class MainWindow(QMainWindow):
         self.agent_count_label = QLabel("에이전트: 0/0")
         self.statusBar().addPermanentWidget(self.agent_count_label)
 
+        from version import __version__
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setStyleSheet("color: #888; margin-right: 4px;")
+        self.statusBar().addPermanentWidget(self.version_label)
+
         # 시스템 트레이
         self._setup_tray()
 
