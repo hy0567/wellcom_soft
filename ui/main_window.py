@@ -9,7 +9,7 @@ from typing import Dict, Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QToolBar, QLabel, QMenu, QMessageBox,
     QInputDialog, QApplication, QSpinBox, QSystemTrayIcon,
 )
@@ -25,6 +25,7 @@ from core.script_engine import ScriptEngine
 from core.key_mapper import KeyMapper
 from core.recorder import Recorder, Player, RecordingManager
 from ui.grid_view import GridView
+from ui.pc_list_view import PCListView
 from ui.desktop_widget import DesktopWidget
 from ui.settings_dialog import SettingsDialog
 from ui.themes import get_theme_stylesheet
@@ -58,6 +59,10 @@ class MainWindow(QMainWindow):
         self.pc_manager.load_from_db()
         self.pc_manager.load_from_server()
 
+        # 초기 탭 구성 (데이터 로드 후)
+        self._rebuild_group_tabs()
+        self.list_view.rebuild_list()
+
     def _init_ui(self):
         self.setWindowTitle(WINDOW_TITLE)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -79,12 +84,29 @@ class MainWindow(QMainWindow):
         self._create_tree()
         self.splitter.addWidget(self.tree)
 
-        # 우측: 그리드 뷰 (기본 화면)
+        # 우측: 탭 위젯 (전체 목록 / 전체 미리보기 / 그룹별 탭)
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+        self.tab_widget.setDocumentMode(True)
+
+        # 탭 0: 전체 목록 (테이블)
+        self.list_view = PCListView(self.pc_manager, self.agent_server)
+        self.list_view.open_viewer.connect(self._open_viewer)
+        self.list_view.context_menu_requested.connect(self._on_grid_context_menu)
+        self.list_view.selection_changed.connect(self._on_selection_changed)
+        self.tab_widget.addTab(self.list_view, "전체 목록")
+
+        # 탭 1: 전체 미리보기 (기존 그리드)
         self.grid_view = GridView(self.pc_manager, self.agent_server)
         self.grid_view.open_viewer.connect(self._open_viewer)
         self.grid_view.context_menu_requested.connect(self._on_grid_context_menu)
         self.grid_view.selection_changed.connect(self._on_selection_changed)
-        self.splitter.addWidget(self.grid_view)
+        self.tab_widget.addTab(self.grid_view, "전체 미리보기")
+
+        # 그룹 탭 (동적)
+        self._group_tabs: Dict[str, GridView] = {}
+
+        self.splitter.addWidget(self.tab_widget)
 
         self.splitter.setSizes([220, 1180])
 
@@ -133,7 +155,7 @@ class MainWindow(QMainWindow):
         pc_menu.addAction(select_all_action)
 
         deselect_action = QAction("선택 해제(&D)", self)
-        deselect_action.triggered.connect(lambda: self.grid_view.deselect_all())
+        deselect_action.triggered.connect(self._deselect_all)
         pc_menu.addAction(deselect_action)
 
         pc_menu.addSeparator()
@@ -228,11 +250,16 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.action_move_group = QAction("그룹이동", self)
+        self.action_move_group.setToolTip("선택한 PC를 다른 그룹으로 이동")
+        self.action_move_group.triggered.connect(self._move_selected_to_group)
+        toolbar.addAction(self.action_move_group)
+
+        toolbar.addSeparator()
+
         self.action_settings = QAction("설정", self)
         self.action_settings.triggered.connect(self._open_settings)
         toolbar.addAction(self.action_settings)
-
-        # 컬럼/비율/폰트 설정은 GridView 설정 바에서 조절
 
     def _create_tree(self):
         self.tree = QTreeWidget()
@@ -246,10 +273,14 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         signals = self.pc_manager.signals
         signals.device_added.connect(self._refresh_tree)
+        signals.device_added.connect(lambda _: self._rebuild_group_tabs())
         signals.device_removed.connect(self._refresh_tree)
+        signals.device_removed.connect(lambda _: self._rebuild_group_tabs())
         signals.device_renamed.connect(self._refresh_tree)
         signals.device_status_changed.connect(self._on_status_changed)
+        signals.device_moved.connect(self._on_device_moved)
         signals.devices_reloaded.connect(self._refresh_tree)
+        signals.devices_reloaded.connect(self._rebuild_group_tabs)
         self.multi_control.mode_changed.connect(self._on_multi_mode_changed)
         # 연결 모드 변경 시 상태 바 즉시 갱신
         self.agent_server.connection_mode_changed.connect(
@@ -318,6 +349,46 @@ class MainWindow(QMainWindow):
                 pc_item.setForeground(0, QBrush(QColor(158, 158, 158)))
 
         self._update_status_bar()
+
+    def _rebuild_group_tabs(self):
+        """그룹 변경 시 그룹 탭 동적 재구성"""
+        current_tab = self.tab_widget.currentIndex()
+
+        # 기존 그룹 탭 제거 (인덱스 2부터)
+        while self.tab_widget.count() > 2:
+            w = self.tab_widget.widget(2)
+            self.tab_widget.removeTab(2)
+            w.deleteLater()
+        self._group_tabs.clear()
+
+        # 그룹별 탭 추가
+        for group in self.pc_manager.get_groups():
+            # 해당 그룹에 PC가 있을 때만 탭 생성
+            pcs_in_group = self.pc_manager.get_pcs_by_group(group)
+            if not pcs_in_group:
+                continue
+            gv = GridView(self.pc_manager, self.agent_server, group_filter=group)
+            gv.open_viewer.connect(self._open_viewer)
+            gv.context_menu_requested.connect(self._on_grid_context_menu)
+            gv.selection_changed.connect(self._on_selection_changed)
+            self.tab_widget.addTab(gv, f"{group} ({len(pcs_in_group)})")
+            self._group_tabs[group] = gv
+
+        # 탭 인덱스 복원 (가능하면)
+        if current_tab < self.tab_widget.count():
+            self.tab_widget.setCurrentIndex(current_tab)
+
+    def _on_device_moved(self, pc_name: str, new_group: str):
+        """PC 그룹 이동 → 탭 재구성 + 트리 갱신"""
+        self._rebuild_group_tabs()
+        self._refresh_tree()
+
+    def _rebuild_all_views(self):
+        """모든 뷰 갱신"""
+        self.list_view.rebuild_list()
+        self.grid_view.rebuild_grid()
+        for gv in self._group_tabs.values():
+            gv.rebuild_grid()
 
     def _on_status_changed(self, pc_name: str):
         self._refresh_tree()
@@ -473,7 +544,11 @@ class MainWindow(QMainWindow):
 
     def _toggle_multi_control(self):
         self.multi_control.toggle_multi_control()
-        agent_ids = self.grid_view.get_selected_agent_ids()
+        current = self.tab_widget.currentWidget()
+        if hasattr(current, 'get_selected_agent_ids'):
+            agent_ids = current.get_selected_agent_ids()
+        else:
+            agent_ids = self.grid_view.get_selected_agent_ids()
         self.multi_control.set_selected_agents(agent_ids)
 
     def _toggle_group_control(self):
@@ -507,13 +582,24 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, selected_pc_names: list):
         if self.multi_control.is_active:
-            agent_ids = self.grid_view.get_selected_agent_ids()
+            current = self.tab_widget.currentWidget()
+            if hasattr(current, 'get_selected_agent_ids'):
+                agent_ids = current.get_selected_agent_ids()
+            else:
+                agent_ids = self.grid_view.get_selected_agent_ids()
             self.multi_control.set_selected_agents(agent_ids)
             mode_text = "멀컨" if self.multi_control.mode == 'multi' else "그룹"
             self.multi_label.setText(f"{mode_text}: {len(agent_ids)}대")
 
     def _select_all_pcs(self):
-        self.grid_view.select_all()
+        current = self.tab_widget.currentWidget()
+        if hasattr(current, 'select_all'):
+            current.select_all()
+
+    def _deselect_all(self):
+        current = self.tab_widget.currentWidget()
+        if hasattr(current, 'deselect_all'):
+            current.deselect_all()
 
     # ==================== PC 관리 ====================
 
@@ -563,15 +649,52 @@ class MainWindow(QMainWindow):
             if db_row:
                 self.pc_manager.db.update_pc(db_row['id'], memo=memo.strip())
             self._refresh_tree()
-            self.grid_view.rebuild_grid()
+            self._rebuild_all_views()
 
     def _move_pc_group(self, pc_name: str):
         groups = self.pc_manager.get_groups()
-        group, ok = QInputDialog.getItem(self, "그룹 이동", "대상 그룹:", groups, 0, True)
+        choices = ["-- 새 그룹 만들기 --"] + groups
+        group, ok = QInputDialog.getItem(self, "그룹 이동", "대상 그룹:", choices, 0, True)
         if ok and group:
-            if group not in groups:
-                self.pc_manager.db.add_group(group)
+            if group == "-- 새 그룹 만들기 --":
+                group, ok = QInputDialog.getText(self, "새 그룹", "그룹 이름:")
+                if not ok or not group.strip():
+                    return
+                group = group.strip()
             self.pc_manager.move_pc_to_group(pc_name, group)
+
+    def _move_selected_to_group(self):
+        """선택된 PC들을 그룹으로 일괄 이동"""
+        current = self.tab_widget.currentWidget()
+        selected = getattr(current, '_selected_pcs', set())
+        if not selected:
+            QMessageBox.information(self, "알림",
+                                   "이동할 PC를 먼저 선택해주세요.\n"
+                                   "(Ctrl+클릭으로 선택)")
+            return
+
+        groups = self.pc_manager.get_groups()
+        choices = ["-- 새 그룹 만들기 --"] + groups
+        group, ok = QInputDialog.getItem(
+            self, "그룹 이동",
+            f"선택된 {len(selected)}대의 PC를 이동할 그룹:",
+            choices, 0, True,
+        )
+        if not ok or not group:
+            return
+
+        if group == "-- 새 그룹 만들기 --":
+            group, ok = QInputDialog.getText(self, "새 그룹", "그룹 이름:")
+            if not ok or not group.strip():
+                return
+            group = group.strip()
+
+        for pc_name in list(selected):
+            self.pc_manager.move_pc_to_group(pc_name, group)
+
+        self._rebuild_group_tabs()
+        self._refresh_tree()
+        self._rebuild_all_views()
 
     def _rename_group(self, group_name: str):
         new_name, ok = QInputDialog.getText(self, "그룹 이름 변경", "새 그룹 이름:", text=group_name)
@@ -617,7 +740,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         if dialog.exec():
             self._apply_theme()
-            self.grid_view.rebuild_grid()
+            self._rebuild_all_views()
 
     # ==================== 도구 ====================
 
@@ -667,7 +790,12 @@ class MainWindow(QMainWindow):
     def _manual_refresh(self):
         self._sync_from_server()
         self._refresh_tree()
+        # 전체 탭 갱신
+        self.list_view.rebuild_list()
         self.grid_view.rebuild_grid()
+        for gv in self._group_tabs.values():
+            gv.rebuild_grid()
+        self._rebuild_group_tabs()
 
     def _sync_from_server(self):
         try:

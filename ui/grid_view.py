@@ -560,10 +560,12 @@ class GridView(QWidget):
     context_menu_requested = pyqtSignal(str, object)
     selection_changed = pyqtSignal(list)
 
-    def __init__(self, pc_manager: PCManager, agent_server: AgentServer):
+    def __init__(self, pc_manager: PCManager, agent_server: AgentServer,
+                 group_filter: str = None):
         super().__init__()
         self.pc_manager = pc_manager
         self.agent_server = agent_server
+        self._group_filter = group_filter  # None=전체, "그룹명"=해당 그룹만
         self._thumbnails: Dict[str, PCThumbnailWidget] = {}
         self._placeholders: list = []
         self._selected_pcs: set = set()
@@ -777,6 +779,11 @@ class GridView(QWidget):
         filter_text = self._search_input.text().strip().lower()
 
         all_pcs = self.pc_manager.get_all_pcs()
+
+        # 그룹 필터 적용
+        if self._group_filter:
+            all_pcs = [pc for pc in all_pcs if pc.group == self._group_filter]
+
         if filter_text:
             pcs = [
                 pc for pc in all_pcs
