@@ -336,34 +336,65 @@ HEADER_H264_DELTA = 0x04
 
 
 def _get_public_ip() -> str:
-    """공인IP 조회 — 여러 서비스 시도 + STUN 폴백"""
-    # 1차: HTTP 기반 IP 조회 서비스
+    """공인IP 조회 — 병렬 HTTP 조회 + STUN 폴백
+
+    여러 IP 조회 서비스에 병렬 요청하여 가장 먼저 응답하는 결과 사용.
+    """
+    import concurrent.futures
+
     services = [
         'https://api.ipify.org',
         'https://ifconfig.me/ip',
         'https://icanhazip.com',
         'https://checkip.amazonaws.com',
-        'https://api.my-ip.io/v2/ip.txt',
         'https://ipecho.net/plain',
-        'http://ip.jsontest.com/',
     ]
-    for url in services:
+
+    def _query_ip(url: str) -> str:
         try:
             r = requests.get(url, timeout=5, headers={'User-Agent': 'curl/8.0'})
             if r.status_code == 200:
                 text = r.text.strip()
-                # JSON 응답 처리 (jsontest)
                 if text.startswith('{'):
                     import json as _json
                     text = _json.loads(text).get('ip', '')
                 if text and '.' in text and len(text) <= 15:
-                    logger.debug(f"공인IP 조회 성공 ({url}): {text}")
                     return text
         except Exception:
-            continue
+            pass
+        return ''
 
-    # 2차: UDP 소켓으로 외부 서버에 연결하여 로컬 IP 확인 (NAT 환경에서는 사설IP)
-    # 이 방법은 실제 공인IP를 반환하지 않을 수 있지만, 라우터가 NAT 없이 직접 연결된 경우 유효
+    # 1차: 병렬 HTTP 조회 (가장 빠른 응답 사용)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_query_ip, url): url for url in services}
+            for future in concurrent.futures.as_completed(futures, timeout=8):
+                result = future.result()
+                if result:
+                    url = futures[future]
+                    logger.debug(f"공인IP 조회 성공 ({url}): {result}")
+                    return result
+    except Exception:
+        pass
+
+    # 2차: STUN 서버로 공인IP 확인 (NAT 뒤에서도 정확)
+    try:
+        from core.stun_client import stun_discover
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(3)
+        sock.bind(('0.0.0.0', 0))
+        try:
+            result = stun_discover(sock)
+            if result:
+                ip = result[0]
+                logger.debug(f"공인IP (STUN): {ip}")
+                return ip
+        finally:
+            sock.close()
+    except Exception:
+        pass
+
+    # 3차: UDP 소켓 (NAT 없는 환경에서만 유효)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(3)

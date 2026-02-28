@@ -114,7 +114,7 @@ class AgentServer(QObject):
         self._manager_id: str = ""    # 매니저 식별자
         # 연결 타임아웃 설정
         self._timeout_lan: int = 3
-        self._timeout_wan: int = 5
+        self._timeout_wan: int = 10
         self._reconnect_interval: int = 10
         # 핑 타임스탬프 (agent_id → send_time)
         self._ping_times: Dict[str, float] = {}
@@ -631,9 +631,12 @@ class AgentServer(QObject):
             conn.ws = self._relay_ws
             conn.mode = ConnectionMode.RELAY
             conn._connecting = False
-            logger.info(f"[P2P] {agent_id} 릴레이 폴백 (직접 연결 불가)")
+            logger.info(f"[P2P] {agent_id} 릴레이 폴백 (직접 연결 불가) — "
+                         f"{self._UPGRADE_COOLDOWN}초 후 P2P 업그레이드 재시도")
             self.agent_connected.emit(agent_id, "relay")
             self.connection_mode_changed.emit(agent_id, "relay")
+            # 릴레이 연결 후 자동 P2P 업그레이드 시도 (주기적)
+            asyncio.ensure_future(self._auto_p2p_upgrade(agent_id))
             return
 
         # 전부 실패
@@ -643,7 +646,30 @@ class AgentServer(QObject):
         self.agent_disconnected.emit(agent_id)
 
     # P2P 업그레이드 실패 후 재시도 대기 시간 (초)
-    _UPGRADE_COOLDOWN = 120
+    _UPGRADE_COOLDOWN = 30
+    _UPGRADE_RETRY_INTERVAL = 60  # 릴레이 상태 유지 시 주기적 재시도 간격
+
+    async def _auto_p2p_upgrade(self, agent_id: str):
+        """릴레이 연결 후 주기적 P2P 업그레이드 시도"""
+        await asyncio.sleep(self._UPGRADE_COOLDOWN)
+        while True:
+            try:
+                conn = self._connections.get(agent_id)
+                if not conn or conn.mode != ConnectionMode.RELAY:
+                    return  # 연결 해제 또는 이미 업그레이드됨
+                if not conn._upgrading:
+                    logger.info(f"[P2P] {agent_id} 자동 P2P 업그레이드 시도 (WAN→UDP)")
+                    await self._try_p2p_upgrade(agent_id)
+                    # 업그레이드 성공 확인
+                    conn = self._connections.get(agent_id)
+                    if not conn or conn.mode != ConnectionMode.RELAY:
+                        return
+                await asyncio.sleep(self._UPGRADE_RETRY_INTERVAL)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.debug(f"[P2P] {agent_id} 자동 업그레이드 오류: {e}")
+                await asyncio.sleep(self._UPGRADE_RETRY_INTERVAL)
 
     async def _try_p2p_upgrade(self, agent_id: str):
         """릴레이 → P2P 직접 연결 업그레이드 시도 (실패 시 릴레이 유지)"""
@@ -736,6 +762,12 @@ class AgentServer(QObject):
                 return ws, msg
             else:
                 await ws.close()
+        except asyncio.TimeoutError:
+            logger.info(f"[P2P] 연결 타임아웃 ({url}, {timeout}초)")
+        except ConnectionRefusedError:
+            logger.info(f"[P2P] 연결 거부됨 ({url}) — 포트 미개방 또는 방화벽")
+        except OSError as e:
+            logger.info(f"[P2P] 네트워크 오류 ({url}): {e}")
         except Exception as e:
             logger.info(f"[P2P] 연결 실패 ({url}): {type(e).__name__}: {e}")
         return None

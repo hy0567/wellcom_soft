@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 # 홀펀칭 상수
 PUNCH_MAGIC = b'\x57\x43\x50\x48'  # 'WCPH' - WellCom Punch Hello
 PUNCH_ACK = b'\x57\x43\x50\x41'    # 'WCPA' - WellCom Punch Ack
-PUNCH_DURATION = 4.0              # 홀펀칭 시도 시간 (초)
-PUNCH_DURATION_SYMMETRIC = 6.0    # Symmetric NAT 시 (포트 예측 → 더 오래)
-PUNCH_INTERVAL = 0.05             # 패킷 전송 간격 (50ms)
-PUNCH_TIMEOUT = 5.0               # 전체 타임아웃
+PUNCH_DURATION = 6.0              # 홀펀칭 시도 시간 (초)
+PUNCH_DURATION_SYMMETRIC = 8.0    # Symmetric NAT 시 (포트 예측 → 더 오래)
+PUNCH_INTERVAL = 0.03             # 패킷 전송 간격 (30ms, 빠른 펀칭)
+PUNCH_TIMEOUT = 10.0              # 전체 타임아웃
 
 
 def _create_udp_socket() -> socket.socket:

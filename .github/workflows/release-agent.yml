@@ -1,0 +1,122 @@
+name: Release Agent
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v3.3.3)'
+        required: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build agent.zip
+        run: |
+          python -c "
+          import zipfile, os
+
+          AGENT_FILES = [
+              ('agent/agent_main.py', 'agent_main.py'),
+              ('agent/agent_config.py', 'agent_config.py'),
+              ('agent/screen_capture.py', 'screen_capture.py'),
+              ('agent/input_handler.py', 'input_handler.py'),
+              ('agent/clipboard_monitor.py', 'clipboard_monitor.py'),
+              ('agent/file_receiver.py', 'file_receiver.py'),
+              ('agent/version.py', 'version.py'),
+              ('agent/h264_encoder.py', 'h264_encoder.py'),
+              ('core/__init__.py', 'core/__init__.py'),
+              ('core/stun_client.py', 'core/stun_client.py'),
+              ('core/udp_punch.py', 'core/udp_punch.py'),
+              ('core/udp_channel.py', 'core/udp_channel.py'),
+              ('updater/__init__.py', 'updater/__init__.py'),
+              ('updater/github_client.py', 'updater/github_client.py'),
+              ('updater/update_checker.py', 'updater/update_checker.py'),
+              ('updater/file_manager.py', 'updater/file_manager.py'),
+          ]
+
+          with zipfile.ZipFile('agent.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
+              for src, dst in AGENT_FILES:
+                  if os.path.exists(src):
+                      zf.write(src, dst)
+                  else:
+                      print(f'WARN: {src} not found, skipping')
+          print('agent.zip created')
+          "
+
+      - name: Build app.zip
+        run: |
+          python -c "
+          import zipfile, os
+
+          INCLUDE_DIRS = ['core', 'ui', 'updater']
+          INCLUDE_FILES = ['main.py', 'config.py', 'version.py', 'api_client.py']
+          EXCLUDE = ['__pycache__', '.pyc', '.pyo', 'test_', '.log', '.env']
+
+          def should_exclude(path):
+              for ex in EXCLUDE:
+                  if ex in path:
+                      return True
+              return False
+
+          with zipfile.ZipFile('app.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
+              for f in INCLUDE_FILES:
+                  if os.path.exists(f):
+                      zf.write(f, f)
+              for d in INCLUDE_DIRS:
+                  if not os.path.isdir(d):
+                      continue
+                  for root, dirs, files in os.walk(d):
+                      for fn in files:
+                          fp = os.path.join(root, fn)
+                          if not should_exclude(fp):
+                              zf.write(fp, fp)
+          print('app.zip created')
+          "
+
+      - name: Calculate checksums
+        id: checksums
+        run: |
+          AGENT_SHA=$(sha256sum agent.zip | cut -d' ' -f1)
+          APP_SHA=$(sha256sum app.zip | cut -d' ' -f1)
+          echo "agent_sha=$AGENT_SHA" >> $GITHUB_OUTPUT
+          echo "app_sha=$APP_SHA" >> $GITHUB_OUTPUT
+          echo "SHA256(app.zip): $APP_SHA"
+          echo "SHA256(agent.zip): $AGENT_SHA"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body: |
+            SHA256(app.zip): ${{ steps.checksums.outputs.app_sha }}
+            SHA256(agent.zip): ${{ steps.checksums.outputs.agent_sha }}
+          files: |
+            app.zip
+            agent.zip
+          draft: false
+          prerelease: false
