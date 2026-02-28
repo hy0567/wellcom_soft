@@ -267,37 +267,27 @@ class LoginDialog(QDialog):
             if token:
                 self._auto_login_pending = True
 
-    def showEvent(self, event):
-        """다이얼로그 표시 후 자동 로그인 시도
+    def exec(self):
+        """자동 로그인을 먼저 시도 (다이얼로그 표시 없이).
 
-        자동 로그인 대기 중이면 다이얼로그를 숨긴 상태로 시도.
-        실패 시에만 다이얼로그를 표시.
+        성공하면 즉시 Accepted 반환 → 깜빡임 없음.
+        실패하면 super().exec()로 다이얼로그 표시.
         """
-        super().showEvent(event)
         if self._auto_login_pending:
             self._auto_login_pending = False
-            # 자동 로그인 중에는 다이얼로그 숨김 (깜빡임 방지)
-            self.hide()
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, self._try_auto_login)
-
-    def _try_auto_login(self):
-        """저장된 토큰으로 자동 로그인 시도"""
-        try:
-            if api_client.verify_token():
-                self._logged_in = True
-                logger.info("자동 로그인 성공")
-                self.accept()
-                return
-        except requests.ConnectionError:
-            logger.debug("자동 로그인 실패: 서버 연결 불가")
-        except requests.HTTPError as e:
-            logger.debug(f"자동 로그인 실패: HTTP {e.response.status_code}")
-        except Exception as e:
-            logger.warning(f"자동 로그인 실패: {type(e).__name__}: {e}")
-        logger.debug("자동 로그인 실패 — 수동 로그인 대기")
-        # 자동 로그인 실패 → 다이얼로그 다시 표시
-        self.show()
+            try:
+                if api_client.verify_token():
+                    self._logged_in = True
+                    logger.info("자동 로그인 성공")
+                    return QDialog.DialogCode.Accepted
+            except requests.ConnectionError:
+                logger.debug("자동 로그인 실패: 서버 연결 불가")
+            except requests.HTTPError as e:
+                logger.debug(f"자동 로그인 실패: HTTP {e.response.status_code}")
+            except Exception as e:
+                logger.warning(f"자동 로그인 실패: {type(e).__name__}: {e}")
+            logger.debug("자동 로그인 실패 — 수동 로그인 대기")
+        return super().exec()
 
     def _do_login(self):
         """로그인 실행"""
