@@ -57,6 +57,29 @@ class H264Encoder:
         gop_size: GOP 크기 (키프레임 간격, 기본 60)
     """
 
+    @classmethod
+    def is_available(cls) -> tuple[bool, str]:
+        """H.264 인코딩 가능 여부 사전 확인
+
+        Returns:
+            (available, reason) — True면 사용 가능, False면 사유 문자열
+        """
+        if not AV_AVAILABLE:
+            return False, "PyAV(av) 미설치"
+        if not NUMPY_AVAILABLE:
+            return False, "numpy 미설치"
+
+        # 인코더 존재 여부 확인
+        for enc_name in _HW_ENCODERS + [_SW_ENCODER]:
+            try:
+                codec = av.codec.Codec(enc_name, 'w')
+                if codec:
+                    return True, f"사용 가능: {enc_name}"
+            except Exception:
+                continue
+
+        return False, "지원되는 H.264 인코더 없음 (hw: nvenc/qsv/amf, sw: libx264)"
+
     def __init__(self, width: int, height: int, fps: int = 15,
                  quality: int = 60, gop_size: int = 60):
         if not AV_AVAILABLE:

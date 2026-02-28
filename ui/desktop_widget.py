@@ -450,6 +450,16 @@ class DesktopWidget(QMainWindow):
         self._codec_label.setToolTip("영상 코덱 (H.264 / MJPEG)")
         sb.addPermanentWidget(self._codec_label)
 
+        self._bw_label = QLabel("")
+        self._bw_label.setStyleSheet(label_style)
+        self._bw_label.setToolTip("실효 대역폭 (KB/s)")
+        sb.addPermanentWidget(self._bw_label)
+
+        self._mode_label = QLabel("")
+        self._mode_label.setStyleSheet(label_style)
+        self._mode_label.setToolTip("연결 모드 (WAN/Relay/UDP)")
+        sb.addPermanentWidget(self._mode_label)
+
         self._ratio_label = QLabel("Fit")
         self._ratio_label.setStyleSheet(label_style)
         self._ratio_label.setToolTip("화면 비율 모드 (Fit=비율유지, Stretch=꽉채움)")
@@ -476,6 +486,7 @@ class DesktopWidget(QMainWindow):
         self._server.stream_started.connect(self._on_stream_started)
         self._server.agent_disconnected.connect(self._on_agent_disconnected)
         self._server.connection_mode_changed.connect(self._on_connection_mode_changed)
+        self._server.adaptive_status_received.connect(self._on_adaptive_status)
         self._server.file_progress.connect(self._on_file_progress)
         self._server.file_complete.connect(self._on_file_complete)
 
@@ -602,10 +613,40 @@ class DesktopWidget(QMainWindow):
         self._update_conn_state('disconnected')
         self._screen.set_overlay_text('❌ 에이전트 연결 끊김', '#F44336')
 
+    def _on_adaptive_status(self, agent_id: str, info: dict):
+        """적응형 품질 상태 업데이트 (에이전트로부터 수신)"""
+        if agent_id != self._pc.agent_id:
+            return
+        bw = info.get('bandwidth_kbps', 0)
+        # 대역폭 표시
+        if bw > 1024:
+            self._bw_label.setText(f"{bw / 1024:.1f}MB/s")
+        else:
+            self._bw_label.setText(f"{bw}KB/s")
+
+        # 적응형 품질 정보를 품질 라벨에 표시
+        adaptive_q = info.get('quality', 0)
+        adaptive_scale = info.get('scale', 1.0)
+        if adaptive_scale < 1.0:
+            self._quality_label.setText(f"Q:{adaptive_q} ({adaptive_scale:.0%})")
+        else:
+            self._quality_label.setText(f"Q:{adaptive_q}")
+
     def _on_connection_mode_changed(self, agent_id: str, mode: str):
         """연결 모드 변경 시 스트리밍 재시작 (릴레이→UDP 전환 등)"""
         if agent_id != self._pc.agent_id:
             return
+
+        # 모드 라벨 업데이트
+        mode_display = {'wan': 'WAN', 'udp_p2p': 'UDP', 'relay': 'Relay'}
+        mode_colors = {'wan': '#4CAF50', 'udp_p2p': '#2196F3', 'relay': '#FFA726'}
+        display = mode_display.get(mode, mode)
+        color = mode_colors.get(mode, '#888')
+        self._mode_label.setText(display)
+        self._mode_label.setStyleSheet(
+            f"color: {color}; padding: 0 6px; font-size: 11px; font-weight: bold;"
+        )
+
         if not self._stream_requested:
             return
 
@@ -1191,6 +1232,7 @@ class DesktopWidget(QMainWindow):
             (self._server.stream_started, self._on_stream_started),
             (self._server.agent_disconnected, self._on_agent_disconnected),
             (self._server.connection_mode_changed, self._on_connection_mode_changed),
+            (self._server.adaptive_status_received, self._on_adaptive_status),
         ]:
             try:
                 sig.disconnect(slot)

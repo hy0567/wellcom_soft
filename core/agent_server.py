@@ -93,6 +93,7 @@ class AgentServer(QObject):
     monitors_received = pyqtSignal(str, list)           # agent_id, monitors_list
     performance_received = pyqtSignal(str, dict)        # agent_id, {cpu, ram, disk}
     audio_received = pyqtSignal(str, bytes)             # agent_id, pcm_data
+    adaptive_status_received = pyqtSignal(str, dict)   # agent_id, adaptive_info
 
     CHUNK_SIZE = 64 * 1024  # 64KB
 
@@ -877,9 +878,13 @@ class AgentServer(QObject):
                 'height': msg.get('height', 0),
                 'fps': msg.get('fps', 15),
                 'quality': msg.get('quality', 60),
+                'relay_mode': msg.get('relay_mode', False),
             }
             self.stream_started.emit(agent_id, info)
             logger.info(f"[P2P] {agent_id} 스트림 시작: codec={info['codec']}")
+
+        elif msg_type == 'adaptive_status':
+            self.adaptive_status_received.emit(agent_id, msg)
 
         elif msg_type == 'clipboard':
             fmt = msg.get('format', '')
@@ -1120,8 +1125,11 @@ class AgentServer(QObject):
                 'height': msg.get('height', 0),
                 'fps': msg.get('fps', 15),
                 'quality': msg.get('quality', 60),
+                'relay_mode': msg.get('relay_mode', False),
             }
             self.stream_started.emit(agent_id, info)
+        elif msg_type == 'adaptive_status':
+            self.adaptive_status_received.emit(agent_id, msg)
         elif msg_type == 'clipboard':
             fmt = msg.get('format', '')
             data = msg.get('data', '')
@@ -1228,9 +1236,12 @@ class AgentServer(QObject):
                 'height': msg.get('height', 0),
                 'fps': msg.get('fps', 15),
                 'quality': msg.get('quality', 60),
+                'relay_mode': msg.get('relay_mode', False),
             }
             self.stream_started.emit(agent_id, info)
             logger.info(f"[UDP] {agent_id} 스트림 시작: codec={info['codec']}")
+        elif msg_type == 'adaptive_status':
+            self.adaptive_status_received.emit(agent_id, msg)
         elif msg_type == 'clipboard':
             fmt = msg.get('format', '')
             data = msg.get('data', '')

@@ -10,10 +10,25 @@ WellcomSOFT Agent PyInstaller Spec
 """
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
 project_path = Path(SPECPATH).parent  # wellcomsoft/
 
 block_cipher = None
+
+# av(PyAV) 네이티브 라이브러리 번들 (H.264 인코딩용)
+av_datas, av_binaries, av_hiddenimports = [], [], []
+try:
+    av_datas, av_binaries, av_hiddenimports = collect_all('av')
+except Exception:
+    pass
+
+# miniupnpc 네이티브 라이브러리 번들 (UPnP 포트포워딩용)
+upnp_datas, upnp_binaries, upnp_hiddenimports = [], [], []
+try:
+    upnp_datas, upnp_binaries, upnp_hiddenimports = collect_all('miniupnpc')
+except Exception:
+    pass
 
 a = Analysis(
     [str(project_path / 'agent' / 'agent_launcher.py')],  # 런처가 엔트리포인트
@@ -21,7 +36,7 @@ a = Analysis(
         str(project_path / 'agent'),
         str(project_path),
     ],
-    binaries=[],
+    binaries=av_binaries + upnp_binaries,
     datas=[
         # 최초 배포 시 app/ 코드를 포함
         (str(project_path / 'agent' / 'agent_main.py'), 'app'),
@@ -44,7 +59,7 @@ a = Analysis(
         (str(project_path / 'updater' / 'file_manager.py'), 'app/updater'),
         # 아이콘 파일 (트레이 아이콘용)
         (str(project_path / 'build' / 'wellcom.ico'), 'assets'),
-    ],
+    ] + av_datas + upnp_datas,
     hiddenimports=[
         'requests',
         'websockets',
@@ -77,7 +92,7 @@ a = Analysis(
         'av.video.frame',
         'av.error',
         'numpy',
-    ],
+    ] + av_hiddenimports + upnp_hiddenimports,
     hookspath=[],
     runtime_hooks=[],
     excludes=[

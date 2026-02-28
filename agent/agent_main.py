@@ -628,6 +628,9 @@ class WellcomAgent:
         # UPnP / NAT-PMP
         self._upnp = None
         self._natpmp_gateway = ''
+        self._upnp_ok = False
+        self._upnp_external_ip = ''
+        self._natpmp_ok = False
 
         # 연결 상태 플래그 (트레이 아이콘 동적 업데이트용)
         self._relay_connected = False       # 서버 릴레이 연결 여부
@@ -654,6 +657,9 @@ class WellcomAgent:
             'ip': self._local_ip,
             'ip_public': self._public_ip,
             'mac_address': self._mac_address,
+            'upnp_ok': self._upnp_ok,
+            'upnp_external_ip': self._upnp_external_ip,
+            'natpmp_ok': self._natpmp_ok,
         }
 
     def _get_hardware_info(self) -> dict:
@@ -727,59 +733,86 @@ class WellcomAgent:
         return info
 
     def _setup_upnp(self) -> bool:
-        """UPnP로 WS 포트 자동 개방 (검증 포함)"""
+        """UPnP로 WS 포트 자동 개방 (TCP+UDP, 검증 포함)"""
         try:
             import miniupnpc
+        except ImportError:
+            logger.warning("[UPnP] miniupnpc 미설치 — pip install miniupnpc")
+            return False
+
+        try:
             upnp = miniupnpc.UPnP()
-            upnp.discoverdelay = 1000  # 느린 라우터 대응 (기존 200ms)
+            upnp.discoverdelay = 2000  # 느린 라우터 대응 (2초)
             discovered = upnp.discover()
             if not discovered:
-                logger.info("[UPnP] 라우터 발견 실패")
+                logger.warning("[UPnP] 라우터 발견 실패 (discover=0) — "
+                               "UPnP 미지원 또는 비활성화된 라우터")
                 return False
-            upnp.selectigd()
-            local_ip = self._local_ip
 
-            # 포트 매핑 추가 (기존 매핑 충돌 시 삭제 후 재시도)
             try:
-                upnp.addportmapping(
-                    self._ws_port, 'TCP', local_ip, self._ws_port,
-                    'WellcomAgent', ''
-                )
-            except Exception:
+                upnp.selectigd()
+            except Exception as e:
+                logger.warning(f"[UPnP] IGD 선택 실패: {type(e).__name__}: {e} — "
+                               "라우터가 UPnP IGD를 지원하지 않음")
+                return False
+
+            local_ip = self._local_ip
+            protocols = ['TCP', 'UDP']
+            success_count = 0
+
+            for proto in protocols:
                 try:
-                    upnp.deleteportmapping(self._ws_port, 'TCP')
                     upnp.addportmapping(
-                        self._ws_port, 'TCP', local_ip, self._ws_port,
+                        self._ws_port, proto, local_ip, self._ws_port,
                         'WellcomAgent', ''
                     )
-                except Exception as e2:
-                    logger.info(f"[UPnP] 포트 매핑 실패: {e2}")
-                    return False
+                    success_count += 1
+                    logger.info(f"[UPnP] {proto} 포트 {self._ws_port} 매핑 추가 성공")
+                except Exception as e1:
+                    # 기존 매핑 충돌 → 삭제 후 재시도
+                    logger.debug(f"[UPnP] {proto} 매핑 첫 시도 실패 ({e1}) — 삭제 후 재시도")
+                    try:
+                        upnp.deleteportmapping(self._ws_port, proto)
+                        upnp.addportmapping(
+                            self._ws_port, proto, local_ip, self._ws_port,
+                            'WellcomAgent', ''
+                        )
+                        success_count += 1
+                        logger.info(f"[UPnP] {proto} 포트 {self._ws_port} 매핑 재시도 성공")
+                    except Exception as e2:
+                        logger.warning(f"[UPnP] {proto} 포트 매핑 최종 실패: "
+                                       f"{type(e2).__name__}: {e2}")
 
-            # 매핑 검증
+            if success_count == 0:
+                logger.warning("[UPnP] TCP/UDP 모두 매핑 실패")
+                return False
+
+            # 매핑 검증 (TCP)
             try:
                 mapping = upnp.getspecificportmapping(self._ws_port, 'TCP')
                 if not mapping:
-                    logger.info("[UPnP] 매핑 검증 실패")
-                    return False
+                    logger.info("[UPnP] TCP 매핑 검증 실패 (라우터가 매핑을 거부했을 수 있음)")
             except Exception:
                 pass  # 검증 실패해도 매핑 자체는 성공일 수 있음
 
             external_ip = upnp.externalipaddress()
             if external_ip:
                 self._public_ip = external_ip
+                self._upnp_external_ip = external_ip
             self._upnp = upnp
-            logger.info(f"[UPnP] 포트 {self._ws_port} 개방 성공, 공인IP: {external_ip}")
+            self._upnp_ok = True
+            logger.info(f"[UPnP] 포트 {self._ws_port} 개방 성공 "
+                         f"({success_count}/{len(protocols)} 프로토콜), 공인IP: {external_ip}")
             return True
-        except ImportError:
-            logger.debug("[UPnP] miniupnpc 미설치")
-            return False
         except Exception as e:
-            logger.info(f"[UPnP] 포트 개방 실패 ({e})")
+            logger.warning(f"[UPnP] 포트 개방 실패: {type(e).__name__}: {e}")
             return False
 
     def _setup_natpmp(self) -> bool:
-        """NAT-PMP로 포트 매핑 (UPnP 실패 시 폴백, 외부 패키지 불필요)"""
+        """NAT-PMP로 포트 매핑 (UPnP 실패 시 폴백, 외부 패키지 불필요)
+
+        TCP와 UDP 모두 매핑 시도.
+        """
         try:
             import struct as _struct
             gateway = self._get_default_gateway()
@@ -790,31 +823,47 @@ class WellcomAgent:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(3)
 
-            # NAT-PMP TCP 매핑 요청 (RFC 6886)
-            # version=0, opcode=2(TCP), reserved=0, internal, external, lifetime=7200
-            request = _struct.pack('!BBHHHHI', 0, 2, 0,
-                                   self._ws_port, self._ws_port, 7200)
-            sock.sendto(request, (gateway, 5351))
+            success = False
+            # opcode 1=UDP, 2=TCP
+            for proto_name, opcode in [('TCP', 2), ('UDP', 1)]:
+                try:
+                    request = _struct.pack('!BBHHHHI', 0, opcode, 0,
+                                           self._ws_port, self._ws_port, 7200)
+                    sock.sendto(request, (gateway, 5351))
 
-            data, _ = sock.recvfrom(64)
+                    data, _ = sock.recvfrom(64)
+
+                    if len(data) >= 16:
+                        _, _, result_code, _, internal, external, lifetime = \
+                            _struct.unpack('!BBHIHHI', data[:16])
+                        if result_code == 0:
+                            logger.info(f"[NAT-PMP] {proto_name} 포트 "
+                                        f"{self._ws_port}→{external} "
+                                        f"매핑 성공 (lifetime={lifetime}s)")
+                            success = True
+                        else:
+                            _pmp_errors = {1: '미지원', 2: '권한 거부',
+                                          3: '네트워크 오류', 4: '리소스 부족',
+                                          5: 'opcode 미지원'}
+                            reason = _pmp_errors.get(result_code,
+                                                     f'코드 {result_code}')
+                            logger.info(f"[NAT-PMP] {proto_name} 거부: {reason}")
+                except socket.timeout:
+                    logger.debug(f"[NAT-PMP] {proto_name} 타임아웃")
+                except Exception as ep:
+                    logger.debug(f"[NAT-PMP] {proto_name} 오류: {ep}")
+
             sock.close()
 
-            if len(data) >= 16:
-                _, _, result_code, _, internal, external, lifetime = \
-                    _struct.unpack('!BBHIHHI', data[:16])
-                if result_code == 0:
-                    self._natpmp_gateway = gateway
-                    logger.info(f"[NAT-PMP] 포트 {self._ws_port}→{external} "
-                                f"매핑 성공 (lifetime={lifetime}s)")
-                    return True
-                else:
-                    logger.debug(f"[NAT-PMP] 거부 (result={result_code})")
-            return False
+            if success:
+                self._natpmp_gateway = gateway
+                self._natpmp_ok = True
+            return success
         except socket.timeout:
             logger.debug("[NAT-PMP] 타임아웃 (미지원 라우터)")
             return False
         except Exception as e:
-            logger.debug(f"[NAT-PMP] 실패: {e}")
+            logger.debug(f"[NAT-PMP] 실패: {type(e).__name__}: {e}")
             return False
 
     @staticmethod
@@ -865,33 +914,41 @@ class WellcomAgent:
 
     @staticmethod
     def _add_firewall_rule(ws_port: int):
-        """Windows 방화벽 TCP 인바운드 규칙 추가 (포트 21350 직접 P2P용)"""
+        """Windows 방화벽 TCP+UDP 인바운드 규칙 추가 (WAN P2P + UDP 홀펀칭용)"""
         if platform.system() != 'Windows':
             return
-        rule_name = 'WellcomAgent'
-        try:
-            chk = subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
-                capture_output=True, text=True, timeout=5,
-                encoding='utf-8', errors='replace',
-            )
-            if rule_name in chk.stdout:
-                logger.debug(f"[Firewall] 규칙 이미 존재: {rule_name}")
-                return
-            res = subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
-                 f'name={rule_name}', 'protocol=TCP', 'dir=in',
-                 f'localport={ws_port}', 'action=allow',
-                 'description=WellcomSOFT Agent P2P Port'],
-                capture_output=True, text=True, timeout=5,
-                encoding='utf-8', errors='replace',
-            )
-            if res.returncode == 0:
-                logger.info(f"[Firewall] 포트 {ws_port} TCP 인바운드 규칙 추가")
-            else:
-                logger.info("[Firewall] 규칙 추가 실패 (관리자 권한 필요) — 릴레이 폴백 사용")
-        except Exception as e:
-            logger.debug(f"[Firewall] 오류: {e}")
+
+        rules = [
+            ('WellcomAgent-TCP', 'TCP', str(ws_port)),
+            ('WellcomAgent-UDP', 'UDP', str(ws_port)),
+        ]
+
+        for rule_name, protocol, port in rules:
+            try:
+                chk = subprocess.run(
+                    ['netsh', 'advfirewall', 'firewall', 'show', 'rule',
+                     f'name={rule_name}'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace',
+                )
+                if rule_name in chk.stdout:
+                    logger.debug(f"[Firewall] 규칙 이미 존재: {rule_name}")
+                    continue
+                res = subprocess.run(
+                    ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                     f'name={rule_name}', f'protocol={protocol}', 'dir=in',
+                     f'localport={port}', 'action=allow',
+                     f'description=WellcomSOFT Agent {protocol} Port'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace',
+                )
+                if res.returncode == 0:
+                    logger.info(f"[Firewall] 포트 {port} {protocol} 인바운드 규칙 추가")
+                else:
+                    logger.info(f"[Firewall] {protocol} 규칙 추가 실패 "
+                                "(관리자 권한 필요) — 릴레이 폴백 사용")
+            except Exception as e:
+                logger.debug(f"[Firewall] {protocol} 오류: {e}")
 
     async def _relay_outbound_loop(self):
         """서버 릴레이 아웃바운드 연결 유지 (포트 개방 불필요 폴백)
@@ -1176,10 +1233,14 @@ class WellcomAgent:
         logger.info(f"사설IP: {self._local_ip}, 공인IP: {self._public_ip or '조회 실패'}")
 
         # 2. 포트 자동 개방: UPnP → NAT-PMP 폴백 (성공 시 공인IP 갱신)
-        if not self._setup_upnp():
-            self._setup_natpmp()
+        upnp_result = self._setup_upnp()
+        natpmp_result = False
+        if not upnp_result:
+            natpmp_result = self._setup_natpmp()
+        logger.info(f"[PortForward] UPnP={self._upnp_ok}, NAT-PMP={self._natpmp_ok}, "
+                     f"외부IP={self._upnp_external_ip or self._public_ip or 'N/A'}")
 
-        # 2-b. Windows 방화벽 인바운드 규칙 추가 (P2P LAN/WAN용)
+        # 2-b. Windows 방화벽 인바운드 규칙 추가 (P2P LAN/WAN + UDP용)
         self._add_firewall_rule(self._ws_port)
 
         # 3. 서버 로그인 + 등록
@@ -1786,13 +1847,75 @@ class WellcomAgent:
         finally:
             logger.info(f"[{manager_id}] 썸네일 push 중지")
 
+    @staticmethod
+    def _adaptive_settings(bandwidth_kbps: float, is_relay: bool,
+                           base_quality: int, base_fps: int,
+                           recent_skips: int) -> tuple[int, int, float]:
+        """대역폭 기반 적응형 품질/FPS/스케일 계산
+
+        Args:
+            bandwidth_kbps: 실효 대역폭 (KB/s)
+            is_relay: 릴레이 모드 여부
+            base_quality: 사용자 요청 품질
+            base_fps: 사용자 요청 FPS
+            recent_skips: 최근 스킵된 프레임 수
+
+        Returns:
+            (quality, fps, scale) 튜플
+        """
+        if not is_relay:
+            # 직접 연결: 대역폭 넉넉하면 원본 설정 유지
+            if bandwidth_kbps > 2000 and recent_skips == 0:
+                return base_quality, base_fps, 1.0
+            elif bandwidth_kbps > 1000:
+                return max(30, int(base_quality * 0.8)), base_fps, 1.0
+            else:
+                # 직접 연결인데 대역폭 부족 → 약간만 줄임
+                return max(20, int(base_quality * 0.7)), max(10, base_fps), 0.9
+
+        # 릴레이 모드: 대역폭에 따라 단계적 조절
+        if bandwidth_kbps > 1500:
+            # 대역폭 넉넉: 높은 품질
+            q = max(30, int(base_quality * 0.7))
+            f = min(base_fps, 25)
+            s = 0.85
+        elif bandwidth_kbps > 800:
+            # 중간 대역폭
+            q = max(20, int(base_quality * 0.5))
+            f = min(base_fps, 20)
+            s = 0.75
+        elif bandwidth_kbps > 400:
+            # 낮은 대역폭
+            q = max(15, int(base_quality * 0.4))
+            f = min(base_fps, 15)
+            s = 0.65
+        else:
+            # 매우 낮은 대역폭
+            q = max(10, int(base_quality * 0.3))
+            f = min(base_fps, 10)
+            s = 0.5
+
+        # 프레임 스킵이 많으면 추가 감소
+        if recent_skips > 3:
+            q = max(10, q - 5)
+            f = max(5, f - 3)
+            s = max(0.4, s - 0.1)
+
+        return q, f, s
+
     async def _start_streaming(self, websocket, fps: int, quality: int, manager_id: str,
                                codec: str = 'mjpeg', keyframe_interval: int = 60):
-        """화면 스트리밍 시작 (매니저별 독립, MJPEG/H.264 코덱 지원)"""
+        """화면 스트리밍 시작 (매니저별 독립, MJPEG/H.264 코덱 지원)
+
+        릴레이 모드 자동 감지: 품질/스케일 자동 조절 + 프레임 스킵
+        """
         interval = 1.0 / max(1, fps)
         actual_codec = codec
         encoder = None
         encoder_name = ''
+
+        # 릴레이 모드 감지 (manager_id가 'relay'이면 릴레이)
+        is_relay = (manager_id == 'relay')
 
         # H.264 인코더 초기화 시도
         if codec == 'h264':
@@ -1804,8 +1927,19 @@ class WellcomAgent:
                 encoder_name = encoder.encoder_name
                 self._h264_encoders[manager_id] = encoder
                 logger.info(f"[{manager_id}] H.264 인코더 활성화: {encoder_name}")
+            except ImportError as e:
+                logger.warning(f"[{manager_id}] H.264 모듈 로드 실패: {e} — "
+                               "PyAV(av) 또는 numpy 미설치, MJPEG 폴백")
+                actual_codec = 'mjpeg'
+                encoder = None
+            except RuntimeError as e:
+                logger.warning(f"[{manager_id}] H.264 인코더 사용 불가: {e} — "
+                               "하드웨어/소프트웨어 인코더 모두 실패, MJPEG 폴백")
+                actual_codec = 'mjpeg'
+                encoder = None
             except Exception as e:
-                logger.warning(f"[{manager_id}] H.264 인코더 초기화 실패 ({e}) — MJPEG 폴백")
+                logger.warning(f"[{manager_id}] H.264 초기화 예외: "
+                               f"{type(e).__name__}: {e} — MJPEG 폴백")
                 actual_codec = 'mjpeg'
                 encoder = None
 
@@ -1820,32 +1954,129 @@ class WellcomAgent:
                 'height': screen_h,
                 'fps': fps,
                 'quality': quality,
+                'relay_mode': is_relay,
             }))
         except Exception:
             pass
 
-        logger.info(f"[{manager_id}] 스트리밍 시작: codec={actual_codec}, {fps}fps, Q={quality}")
+        mode_str = "relay" if is_relay else "direct"
+        logger.info(f"[{manager_id}] 스트리밍 시작: codec={actual_codec}, {fps}fps, "
+                     f"Q={quality}, mode={mode_str}")
+
+        # 적응형 품질 변수
+        send_times = []           # 최근 전송 시간 (슬라이딩 윈도우)
+        frame_sizes = []          # 최근 프레임 크기 (대역폭 계산)
+        skip_count = 0            # 연속 스킵 카운트
+        total_skips = 0           # 총 스킵 수
+        frame_count = 0           # 총 프레임 수
+        last_log_time = time.monotonic()
+        last_adapt_time = time.monotonic()
+
+        # 적응형 파라미터 (초기값)
+        adaptive_quality = quality
+        adaptive_scale = 1.0
+        adaptive_fps = fps
+        if is_relay:
+            # 릴레이 모드 초기값: 보수적으로 시작
+            adaptive_quality = max(10, int(quality * 0.6))
+            adaptive_scale = 0.75
 
         try:
             while self._running:
                 settings = self._stream_settings.get(manager_id, {})
-                cur_quality = settings.get('quality', quality)
-                cur_fps = settings.get('fps', fps)
+                base_quality = settings.get('quality', quality)
+                base_fps = settings.get('fps', fps)
+
+                # 적응형 조절 적용
+                cur_quality = min(base_quality, adaptive_quality)
+                cur_fps = min(base_fps, adaptive_fps)
+                cur_scale = adaptive_scale
                 cur_interval = 1.0 / max(1, cur_fps)
+
+                frame_count += 1
+                frame_size = 0
 
                 if actual_codec == 'h264' and encoder:
                     # H.264 경로: raw 캡처 → 인코딩 → NAL 전송
                     raw_img = self.screen_capture.capture_raw()
                     if raw_img:
                         packets = encoder.encode_frame(raw_img)
+                        t0 = time.monotonic()
                         for is_key, nal_bytes in packets:
                             header = HEADER_H264_KEYFRAME if is_key else HEADER_H264_DELTA
                             await websocket.send(bytes([header]) + nal_bytes)
+                            frame_size += len(nal_bytes) + 1
+                        elapsed = time.monotonic() - t0
+                        send_times.append(elapsed)
+                        frame_sizes.append(frame_size)
                 else:
-                    # MJPEG 경로 (기존)
-                    jpeg_data = self.screen_capture.capture_jpeg(quality=cur_quality)
+                    # MJPEG 경로
+                    jpeg_data = self.screen_capture.capture_jpeg(
+                        quality=cur_quality, scale=cur_scale)
                     if jpeg_data:
+                        frame_size = len(jpeg_data) + 1
+                        t0 = time.monotonic()
                         await websocket.send(bytes([HEADER_STREAM]) + jpeg_data)
+                        elapsed = time.monotonic() - t0
+                        send_times.append(elapsed)
+                        frame_sizes.append(frame_size)
+
+                        # 프레임 스킵: 전송이 interval보다 오래 걸리면 다음 프레임 스킵
+                        if elapsed > cur_interval * 1.5:
+                            skip_count += 1
+                            total_skips += 1
+                            continue
+
+                # 슬라이딩 윈도우 유지 (최근 30개)
+                if len(send_times) > 30:
+                    send_times = send_times[-30:]
+                if len(frame_sizes) > 30:
+                    frame_sizes = frame_sizes[-30:]
+
+                # 2초마다 적응형 품질 재계산
+                now = time.monotonic()
+                if (now - last_adapt_time) >= 2.0 and len(send_times) >= 5:
+                    avg_send = sum(send_times) / len(send_times)
+                    avg_size = sum(frame_sizes) / len(frame_sizes) if frame_sizes else 0
+                    # 실효 대역폭 추정 (KB/s)
+                    bandwidth_kbps = (avg_size / max(avg_send, 0.001)) / 1024
+
+                    prev_q, prev_s, prev_f = adaptive_quality, adaptive_scale, adaptive_fps
+                    adaptive_quality, adaptive_fps, adaptive_scale = \
+                        self._adaptive_settings(bandwidth_kbps, is_relay,
+                                                base_quality, base_fps, skip_count)
+                    last_adapt_time = now
+                    skip_count = 0
+
+                    # 변경 시 로그
+                    if (prev_q != adaptive_quality or prev_s != adaptive_scale
+                            or prev_f != adaptive_fps):
+                        logger.info(f"[{manager_id}] 적응형 조절: Q={adaptive_quality}, "
+                                     f"scale={adaptive_scale:.2f}, fps={adaptive_fps}, "
+                                     f"bw={bandwidth_kbps:.0f}KB/s")
+
+                    # 매니저에 현재 적응형 상태 알림
+                    try:
+                        await websocket.send(json.dumps({
+                            'type': 'adaptive_status',
+                            'quality': adaptive_quality,
+                            'scale': adaptive_scale,
+                            'fps': adaptive_fps,
+                            'bandwidth_kbps': round(bandwidth_kbps),
+                            'relay_mode': is_relay,
+                            'skipped_frames': total_skips,
+                        }))
+                    except Exception:
+                        pass
+
+                # 5초마다 상태 로그
+                if (now - last_log_time) > 5.0:
+                    avg_send = sum(send_times) / len(send_times) if send_times else 0
+                    logger.debug(f"[{manager_id}] stream: frames={frame_count}, "
+                                 f"skipped={total_skips}, avg_send={avg_send*1000:.0f}ms, "
+                                 f"Q={cur_quality}, scale={cur_scale:.2f}, "
+                                 f"mode={mode_str}")
+                    last_log_time = now
 
                 await asyncio.sleep(cur_interval)
         except asyncio.CancelledError:
@@ -1864,7 +2095,8 @@ class WellcomAgent:
                     pass
             self._stream_tasks.pop(manager_id, None)
             self._stream_settings.pop(manager_id, None)
-            logger.info(f"[{manager_id}] 스트리밍 중지 (codec={actual_codec})")
+            logger.info(f"[{manager_id}] 스트리밍 중지 (codec={actual_codec}, "
+                         f"total_frames={frame_count})")
 
     async def _start_audio_capture(self, websocket, msg: dict):
         """오디오 루프백 캡처 시작"""
