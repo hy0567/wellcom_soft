@@ -58,7 +58,6 @@ class PCManager:
         agent_server.agent_disconnected.connect(self._on_agent_disconnected)
         agent_server.thumbnail_received.connect(self._on_thumbnail_received)
         agent_server.connection_mode_changed.connect(self._on_connection_mode_changed)
-        agent_server.agent_info_received.connect(self._on_agent_info_received)
 
     # ==================== PC 관리 ====================
 
@@ -167,36 +166,23 @@ class PCManager:
                 srv_last_seen = agent_data.get('last_seen', '')
 
                 if existing_pc:
-                    # 기존 PC 정보 업데이트 (빈 값으로 기존 값 덮어쓰지 않음)
-                    update_kwargs = {}
-                    for key, srv_key, default in [
-                        ('ip', 'ip', ''),
-                        ('os_info', 'os_info', ''),
-                        ('hostname', None, ''),  # hostname은 위에서 이미 계산
-                        ('mac_address', 'mac_address', ''),
-                        ('public_ip', 'ip_public', ''),
-                        ('ws_port', 'ws_port', 0),
-                        ('agent_version', 'agent_version', ''),
-                        ('cpu_model', 'cpu_model', ''),
-                        ('cpu_cores', 'cpu_cores', 0),
-                        ('ram_gb', 'ram_gb', 0.0),
-                        ('motherboard', 'motherboard', ''),
-                        ('gpu_model', 'gpu_model', ''),
-                    ]:
-                        if srv_key is None:
-                            val = hostname
-                        else:
-                            val = agent_data.get(srv_key, default)
-                        # 서버에서 유효한 값이 있을 때만 업데이트
-                        if val and val != default:
-                            update_kwargs[key] = val
-                    # screen 크기는 서버 값이 있으면 업데이트
-                    if agent_data.get('screen_width', 0) > 0:
-                        update_kwargs['screen_width'] = agent_data['screen_width']
-                    if agent_data.get('screen_height', 0) > 0:
-                        update_kwargs['screen_height'] = agent_data['screen_height']
-                    if update_kwargs:
-                        existing_pc.update_info(**update_kwargs)
+                    # 기존 PC 정보 업데이트
+                    existing_pc.update_info(
+                        ip=agent_data.get('ip', ''),
+                        os_info=agent_data.get('os_info', ''),
+                        hostname=hostname,
+                        mac_address=agent_data.get('mac_address', ''),
+                        screen_width=agent_data.get('screen_width', 1920),
+                        screen_height=agent_data.get('screen_height', 1080),
+                        public_ip=agent_data.get('ip_public', ''),
+                        ws_port=agent_data.get('ws_port', 21350),
+                        agent_version=agent_data.get('agent_version', ''),
+                        cpu_model=agent_data.get('cpu_model', ''),
+                        cpu_cores=agent_data.get('cpu_cores', 0),
+                        ram_gb=agent_data.get('ram_gb', 0.0),
+                        motherboard=agent_data.get('motherboard', ''),
+                        gpu_model=agent_data.get('gpu_model', ''),
+                    )
                     existing_pc.info.group = agent_data.get('group_name', 'default')
                     existing_pc.server_online = srv_online
                     existing_pc.last_seen_str = srv_last_seen
@@ -439,26 +425,10 @@ class PCManager:
         ws = conn.ws if conn else None
 
         with self._lock:
-            # 연결 모드에 따라 IP 처리
-            from core.agent_server import ConnectionMode
-            if conn and conn.mode == ConnectionMode.RELAY:
-                # 릴레이 연결: ip(내부IP)는 system_info에서 업데이트됨
-                # 여기서는 public_ip만 설정
-                pc.mark_online(ws, ip)
-                if conn.ip_public:
-                    pc.info.public_ip = conn.ip_public
-                # 내부IP가 이미 있으면 공인IP로 덮어쓰지 않음
-                if pc.info.ip and pc.info.ip != ip and ip != 'relay':
-                    pass  # 기존 내부IP 유지
-                elif ip and ip != 'relay':
-                    pc.info.ip = ip
-            else:
-                pc.mark_online(ws, ip)
-
+            pc.mark_online(ws, ip)
             # P2P 연결 매니저 정보 저장
             if conn:
-                if conn.ip_public:
-                    pc.info.public_ip = conn.ip_public
+                pc.info.public_ip = conn.ip_public
                 pc.info.ws_port = conn.ws_port
                 pc.info.connection_mode = conn.mode.value
                 # auth_ok에서 전달된 agent_version 저장
@@ -466,13 +436,11 @@ class PCManager:
                 if conn_info.get('agent_version'):
                     pc.info.agent_version = conn_info['agent_version']
 
-            # DB에 IP 업데이트 (빈 값으로 덮어쓰지 않음)
+            # DB에 IP 업데이트
             db_row = self.db.get_pc_by_name(pc.name)
             if db_row:
                 info = self.agent_server.get_agent_info(agent_id)
-                update_kwargs = {}
-                if ip and ip != 'relay':
-                    update_kwargs['ip'] = ip
+                update_kwargs = {'ip': ip}
                 if info:
                     if info.get('hostname'):
                         update_kwargs['hostname'] = info['hostname']
@@ -482,8 +450,7 @@ class PCManager:
                         update_kwargs['screen_width'] = info['screen_width']
                     if info.get('screen_height'):
                         update_kwargs['screen_height'] = info['screen_height']
-                if update_kwargs:
-                    self.db.update_pc(db_row['id'], **update_kwargs)
+                self.db.update_pc(db_row['id'], **update_kwargs)
 
         self.signals.device_status_changed.emit(pc.name)
         logger.info(f"PC 온라인: {pc.name} ({ip})")
@@ -514,49 +481,3 @@ class PCManager:
         pc = self.get_pc_by_agent_id(agent_id)
         if pc:
             pc.update_thumbnail(jpeg_data)
-
-    def _on_agent_info_received(self, agent_id: str, info: dict):
-        """에이전트 system_info 수신 → PCInfo 업데이트 (DB 없이도 정보 표시)"""
-        # 매니저 PC 자신이면 무시
-        hostname = info.get('hostname', '')
-        if self._is_manager_pc(agent_id, hostname):
-            return
-
-        pc = self.get_pc_by_agent_id(agent_id)
-        if not pc:
-            return
-
-        with self._lock:
-            # 기본 정보
-            if info.get('hostname'):
-                pc.info.hostname = info['hostname']
-            if info.get('os_info'):
-                pc.info.os_info = info['os_info']
-            if info.get('ip'):
-                pc.info.ip = info['ip']
-            if info.get('ip_public'):
-                pc.info.public_ip = info['ip_public']
-            if info.get('mac_address'):
-                pc.info.mac_address = info['mac_address']
-            if info.get('screen_width'):
-                pc.info.screen_width = info['screen_width']
-            if info.get('screen_height'):
-                pc.info.screen_height = info['screen_height']
-            if info.get('agent_version'):
-                pc.info.agent_version = info['agent_version']
-            # 하드웨어 정보
-            if info.get('cpu_model'):
-                pc.info.cpu_model = info['cpu_model']
-            if info.get('cpu_cores'):
-                pc.info.cpu_cores = info['cpu_cores']
-            if info.get('ram_gb'):
-                pc.info.ram_gb = info['ram_gb']
-            if info.get('motherboard'):
-                pc.info.motherboard = info['motherboard']
-            if info.get('gpu_model'):
-                pc.info.gpu_model = info['gpu_model']
-
-        self.signals.device_status_changed.emit(pc.name)
-        logger.info(f"PC 정보 업데이트: {pc.name} (agent_id={agent_id}, "
-                    f"hostname={info.get('hostname', '')}, "
-                    f"version={info.get('agent_version', '')})")

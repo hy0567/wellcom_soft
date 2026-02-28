@@ -1,7 +1,6 @@
 """WellcomSOFT 로그인 다이얼로그"""
 
 import logging
-import requests
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QCheckBox, QMessageBox,
@@ -263,7 +262,7 @@ class LoginDialog(QDialog):
 
         # 자동 로그인: exec() 후 시도 (생성자에서 accept() 호출하면 동작 불안정)
         if auto_login and username:
-            token = settings.load_token()
+            token = settings.get('server.token', '')
             if token:
                 self._auto_login_pending = True
 
@@ -287,12 +286,8 @@ class LoginDialog(QDialog):
                 logger.info("자동 로그인 성공")
                 self.accept()
                 return
-        except requests.ConnectionError:
-            logger.debug("자동 로그인 실패: 서버 연결 불가")
-        except requests.HTTPError as e:
-            logger.debug(f"자동 로그인 실패: HTTP {e.response.status_code}")
-        except Exception as e:
-            logger.warning(f"자동 로그인 실패: {type(e).__name__}: {e}")
+        except Exception:
+            pass
         logger.debug("자동 로그인 실패 — 수동 로그인 대기")
 
     def _do_login(self):
@@ -326,13 +321,14 @@ class LoginDialog(QDialog):
             logger.info(f"로그인 성공: {username}")
             self.accept()
 
-        except requests.ConnectionError:
-            QMessageBox.critical(
-                self, "연결 실패",
-                "서버에 연결할 수 없습니다.\n\n서버 상태를 확인하세요."
-            )
-        except requests.HTTPError as e:
-            if e.response.status_code == 401:
+        except Exception as e:
+            err_msg = str(e)
+            if 'Connection' in err_msg:
+                QMessageBox.critical(
+                    self, "연결 실패",
+                    f"서버에 연결할 수 없습니다.\n\n서버 상태를 확인하세요."
+                )
+            elif '401' in err_msg or '사용자' in err_msg or '비밀번호' in err_msg:
                 QMessageBox.warning(
                     self, "로그인 실패",
                     "사용자 이름 또는 비밀번호가 올바르지 않습니다."
@@ -340,18 +336,8 @@ class LoginDialog(QDialog):
             else:
                 QMessageBox.critical(
                     self, "로그인 오류",
-                    f"서버 오류 (HTTP {e.response.status_code})"
+                    f"로그인 중 오류가 발생했습니다.\n\n{err_msg}"
                 )
-        except requests.Timeout:
-            QMessageBox.critical(
-                self, "연결 시간 초과",
-                "서버 응답이 없습니다.\n잠시 후 다시 시도하세요."
-            )
-        except Exception as e:
-            QMessageBox.critical(
-                self, "로그인 오류",
-                f"로그인 중 오류가 발생했습니다.\n\n{type(e).__name__}: {e}"
-            )
         finally:
             self.login_btn.setEnabled(True)
             self.login_btn.setText("로그인")

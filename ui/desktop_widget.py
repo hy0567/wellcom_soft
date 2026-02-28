@@ -132,7 +132,7 @@ class RemoteScreenWidget(QWidget):
             self._scaled_pixmap = self._pixmap.scaled(
                 ww, wh,
                 Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
         else:
             # Fit: 비율 유지 (레터박스)
@@ -146,7 +146,7 @@ class RemoteScreenWidget(QWidget):
             self._scaled_pixmap = self._pixmap.scaled(
                 ww, wh,
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
 
         self._last_widget_size = (ww, wh)
@@ -401,58 +401,46 @@ class DesktopWidget(QMainWindow):
         self._init_statusbar()
 
     def _init_statusbar(self):
-        """상태바 초기화 — 연결상태/FPS/해상도/화질/코덱/비율 (테마 지원)"""
-        theme = settings.get('general.theme', 'light')
-        if theme == 'dark':
-            sb_bg, sb_fg, sb_border = '#1e1e1e', '#aaa', '#3e3e3e'
-        else:
-            sb_bg, sb_fg, sb_border = '#f8fafc', '#64748b', '#e2e8f0'
-
+        """상태바 초기화 — 연결상태/FPS/해상도/화질/코덱/비율"""
         sb = self.statusBar()
-        sb.setStyleSheet(f"""
-            QStatusBar {{
-                background-color: {sb_bg};
-                color: {sb_fg};
+        sb.setStyleSheet("""
+            QStatusBar {
+                background-color: #1e1e1e;
+                color: #aaa;
                 font-size: 11px;
-                border-top: 1px solid {sb_border};
-            }}
-            QStatusBar::item {{ border: none; }}
+                border-top: 1px solid #3e3e3e;
+            }
+            QStatusBar::item { border: none; }
         """)
-        sb.setFixedHeight(26)
+        sb.setFixedHeight(24)
 
-        label_style = f"color: {sb_fg}; padding: 0 6px; font-size: 11px;"
+        label_style = "color: #aaa; padding: 0 6px; font-size: 11px;"
 
         # 연결 상태 인디케이터 (● 원형)
         self._conn_indicator = QLabel("● 연결 중")
         self._conn_indicator.setStyleSheet(
             "color: #FFA726; padding: 0 8px; font-size: 11px; font-weight: bold;"
         )
-        self._conn_indicator.setToolTip("연결 상태")
         sb.addWidget(self._conn_indicator)
 
         self._res_label = QLabel("-- x --")
         self._res_label.setStyleSheet(label_style)
-        self._res_label.setToolTip("원격 PC 화면 해상도")
         sb.addPermanentWidget(self._res_label)
 
         self._fps_label = QLabel("0 FPS")
         self._fps_label.setStyleSheet(label_style)
-        self._fps_label.setToolTip("현재 수신 프레임레이트")
         sb.addPermanentWidget(self._fps_label)
 
         self._quality_label = QLabel(f"Q:{self._current_quality}")
         self._quality_label.setStyleSheet(label_style)
-        self._quality_label.setToolTip("스트리밍 화질 (1-100)")
         sb.addPermanentWidget(self._quality_label)
 
         self._codec_label = QLabel("--")
         self._codec_label.setStyleSheet(label_style)
-        self._codec_label.setToolTip("영상 코덱 (H.264 / MJPEG)")
         sb.addPermanentWidget(self._codec_label)
 
         self._ratio_label = QLabel("Fit")
         self._ratio_label.setStyleSheet(label_style)
-        self._ratio_label.setToolTip("화면 비율 모드 (Fit=비율유지, Stretch=꽉채움)")
         sb.addPermanentWidget(self._ratio_label)
 
     def _update_conn_state(self, state: str):

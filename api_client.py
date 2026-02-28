@@ -17,7 +17,7 @@ class APIClient:
 
     def __init__(self):
         self._base_url = settings.get('server.api_url', 'http://log.wellcomll.org:8000')
-        self._token: str = settings.load_token()
+        self._token: str = settings.get('server.token', '')
         self._user: Optional[dict] = None
 
     @property
@@ -79,7 +79,7 @@ class APIClient:
         })
         self._token = data['token']
         self._user = data['user']
-        settings.save_token(self._token)
+        settings.set('server.token', self._token)
         settings.set('server.username', username)
         return data
 
@@ -91,16 +91,7 @@ class APIClient:
             data = self._get('/api/auth/me')
             self._user = data
             return True
-        except requests.HTTPError as e:
-            logger.info(f"토큰 검증 실패 (HTTP {e.response.status_code})")
-            self._token = ''
-            self._user = None
-            return False
-        except requests.ConnectionError:
-            logger.warning("토큰 검증 실패: 서버 연결 불가")
-            return False
-        except Exception as e:
-            logger.warning(f"토큰 검증 실패: {type(e).__name__}: {e}")
+        except Exception:
             self._token = ''
             self._user = None
             return False
@@ -109,7 +100,7 @@ class APIClient:
         """로그아웃"""
         self._token = ''
         self._user = None
-        settings.clear_token()
+        settings.set('server.token', '')
 
     # ==================== Agent 등록 (에이전트 측) ====================
 
@@ -161,12 +152,8 @@ class APIClient:
                 'screen_height': screen_height,
                 'agent_version': agent_version,
             })
-        except requests.ConnectionError:
-            logger.debug(f"하트비트 실패: 서버 연결 불가")
-        except requests.Timeout:
-            logger.debug(f"하트비트 실패: 타임아웃")
         except Exception as e:
-            logger.warning(f"하트비트 실패: {type(e).__name__}: {e}")
+            logger.debug(f"하트비트 실패: {e}")
 
     def report_offline(self, agent_id: str):
         """에이전트 오프라인 보고"""
@@ -174,10 +161,8 @@ class APIClient:
             self._post('/api/agents/offline', {
                 'agent_id': agent_id,
             })
-        except requests.ConnectionError:
-            logger.debug("오프라인 보고 실패: 서버 연결 불가")
-        except Exception as e:
-            logger.debug(f"오프라인 보고 실패: {type(e).__name__}")
+        except Exception:
+            pass
 
     # ==================== Agent 조회 (매니저 측) ====================
 
@@ -185,73 +170,36 @@ class APIClient:
         """내 에이전트 목록 조회"""
         try:
             return self._get('/api/agents')
-        except requests.ConnectionError:
-            logger.debug("에이전트 목록 조회 실패: 서버 연결 불가")
-            return []
-        except requests.HTTPError as e:
-            logger.warning(f"에이전트 목록 조회 실패 (HTTP {e.response.status_code})")
-            return []
         except Exception as e:
-            logger.warning(f"에이전트 목록 조회 실패: {type(e).__name__}: {e}")
+            logger.warning(f"에이전트 목록 조회 실패: {e}")
             return []
 
     def get_agent(self, agent_db_id: int) -> Optional[dict]:
         """특정 에이전트 조회"""
         try:
             return self._get(f'/api/agents/{agent_db_id}')
-        except requests.ConnectionError:
-            logger.debug(f"에이전트 조회 실패 ({agent_db_id}): 서버 연결 불가")
-            return None
-        except requests.HTTPError as e:
-            logger.warning(f"에이전트 조회 실패 ({agent_db_id}): HTTP {e.response.status_code}")
-            return None
-        except Exception as e:
-            logger.warning(f"에이전트 조회 실패 ({agent_db_id}): {type(e).__name__}: {e}")
+        except Exception:
             return None
 
     def delete_agent(self, agent_db_id: int) -> bool:
-        """에이전트 삭제"""
         try:
             self._delete(f'/api/agents/{agent_db_id}')
             return True
-        except requests.ConnectionError:
-            logger.warning(f"에이전트 삭제 실패 ({agent_db_id}): 서버 연결 불가")
-            return False
-        except requests.HTTPError as e:
-            logger.warning(f"에이전트 삭제 실패 ({agent_db_id}): HTTP {e.response.status_code}")
-            return False
-        except Exception as e:
-            logger.warning(f"에이전트 삭제 실패 ({agent_db_id}): {type(e).__name__}: {e}")
+        except Exception:
             return False
 
     def move_agent_group(self, agent_db_id: int, group_name: str) -> bool:
-        """에이전트 그룹 이동"""
         try:
             self._put(f'/api/agents/{agent_db_id}/group', params={'group_name': group_name})
             return True
-        except requests.ConnectionError:
-            logger.warning(f"그룹 이동 실패 ({agent_db_id}): 서버 연결 불가")
-            return False
-        except requests.HTTPError as e:
-            logger.warning(f"그룹 이동 실패 ({agent_db_id}): HTTP {e.response.status_code}")
-            return False
-        except Exception as e:
-            logger.warning(f"그룹 이동 실패 ({agent_db_id}): {type(e).__name__}: {e}")
+        except Exception:
             return False
 
     def rename_agent(self, agent_db_id: int, display_name: str) -> bool:
-        """에이전트 이름 변경"""
         try:
             self._put(f'/api/agents/{agent_db_id}/name', params={'display_name': display_name})
             return True
-        except requests.ConnectionError:
-            logger.warning(f"이름 변경 실패 ({agent_db_id}): 서버 연결 불가")
-            return False
-        except requests.HTTPError as e:
-            logger.warning(f"이름 변경 실패 ({agent_db_id}): HTTP {e.response.status_code}")
-            return False
-        except Exception as e:
-            logger.warning(f"이름 변경 실패 ({agent_db_id}): {type(e).__name__}: {e}")
+        except Exception:
             return False
 
     def rename_agent_by_agent_id(self, agent_id: str, display_name: str) -> bool:
@@ -260,14 +208,8 @@ class APIClient:
             self._put(f'/api/agents/by-agent-id/{agent_id}/name',
                       params={'display_name': display_name})
             return True
-        except requests.ConnectionError:
-            logger.warning(f"서버 이름 변경 실패 ({agent_id}): 서버 연결 불가")
-            return False
-        except requests.HTTPError as e:
-            logger.warning(f"서버 이름 변경 실패 ({agent_id}): HTTP {e.response.status_code}")
-            return False
         except Exception as e:
-            logger.warning(f"서버 이름 변경 실패 ({agent_id}): {type(e).__name__}: {e}")
+            logger.warning(f"서버 이름 변경 실패 ({agent_id}): {e}")
             return False
 
 

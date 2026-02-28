@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 # 홀펀칭 상수
 PUNCH_MAGIC = b'\x57\x43\x50\x48'  # 'WCPH' - WellCom Punch Hello
 PUNCH_ACK = b'\x57\x43\x50\x41'    # 'WCPA' - WellCom Punch Ack
-PUNCH_DURATION = 5.0              # 홀펀칭 시도 시간 (초)
-PUNCH_DURATION_SYMMETRIC = 8.0    # Symmetric/Unknown NAT 시 (포트 예측 → 더 오래)
-PUNCH_INTERVAL = 0.03             # 패킷 전송 간격 (30ms — 빠르게)
-PUNCH_TIMEOUT = 10.0              # 전체 타임아웃
+PUNCH_DURATION = 4.0              # 홀펀칭 시도 시간 (초)
+PUNCH_DURATION_SYMMETRIC = 6.0    # Symmetric NAT 시 (포트 예측 → 더 오래)
+PUNCH_INTERVAL = 0.05             # 패킷 전송 간격 (50ms)
+PUNCH_TIMEOUT = 5.0               # 전체 타임아웃
 
 
 def _create_udp_socket() -> socket.socket:
@@ -111,7 +111,7 @@ async def punch_as_manager(relay_ws, agent_id: str,
     try:
         # 1. STUN + NAT 타입 감지 (2개 서버 질의)
         logger.info(f"[UDP-Punch] STUN 탐지 시작 (로컬 포트: {local_port})")
-        nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=3.0)
+        nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=2.0)
 
         if not endpoint1 or not endpoint1[0]:
             # stun_detect_nat_type 실패 → 기존 방식 폴백
@@ -265,18 +265,8 @@ async def _do_punch(sock: socket.socket, peer_addr: tuple[str, int],
             targets.append((peer_ip, p))
         logger.info(f"[UDP-Punch] symmetric NAT 감지 → {len(targets)}개 포트 시도 "
                      f"(base={peer_port}, delta={peer_port2 - peer_port})")
-    elif peer_nat_type == "unknown":
-        # NAT 타입 불명 → 주 포트 + 주변 ±16 범위 시도 (잠재적 symmetric 대응)
-        for offset in range(-16, 17):
-            if offset == 0:
-                continue
-            p = peer_port + offset
-            if 1024 < p < 65535:
-                targets.append((peer_ip, p))
-        logger.info(f"[UDP-Punch] unknown NAT → {len(targets)}개 포트 시도 "
-                     f"(base={peer_port}, range=±16)")
 
-    # 다중 포트 시도 시 더 오래 시도
+    # symmetric NAT이면 더 오래 시도
     duration = PUNCH_DURATION_SYMMETRIC if len(targets) > 1 else PUNCH_DURATION
 
     start = time.monotonic()

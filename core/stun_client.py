@@ -173,18 +173,16 @@ async def stun_discover(sock: socket.socket,
 
 
 async def stun_detect_nat_type(sock: socket.socket,
-                                timeout: float = 3.0
+                                timeout: float = 2.0
                                 ) -> tuple[str, tuple[str, int], tuple[str, int] | None]:
-    """같은 소켓으로 여러 STUN 서버에 **동시** 질의하여 NAT 타입 감지.
+    """같은 소켓으로 2개의 STUN 서버에 질의하여 NAT 타입 감지.
 
     포트가 동일하면 non-symmetric (홀펀칭 가능),
     포트가 다르면 symmetric NAT (포트 예측 필요).
 
-    v3.3.5: 순차 질의 → 병렬 질의로 개선 (속도 + 신뢰성)
-
     Args:
         sock: 바인딩된 UDP 소켓 (non-blocking)
-        timeout: 전체 응답 대기 시간
+        timeout: 각 STUN 서버 응답 대기 시간
 
     Returns:
         (nat_type, endpoint1, endpoint2)
@@ -194,22 +192,18 @@ async def stun_detect_nat_type(sock: socket.socket,
     """
     loop = asyncio.get_event_loop()
     results: list[tuple[str, int]] = []
-    seen_servers: set[str] = set()  # 같은 서버 결과 중복 방지
 
-    # 서로 다른 STUN 서버 목록 (다양한 공급자)
-    server_list = [
+    # 서로 다른 STUN 서버 2개 사용 (같은 소켓에서)
+    server_pairs = [
         ('stun.l.google.com', 19302),
         ('stun.cloudflare.com', 3478),
         ('stun1.l.google.com', 19302),
-        ('stun2.l.google.com', 19302),
-        ('stun.stunprotocol.org', 3478),
     ]
 
-    # 각 서버별 txn_id 매핑 (동시 전송용)
-    txn_map: dict[bytes, str] = {}  # txn_id → server_host
+    for host, port in server_pairs:
+        if len(results) >= 2:
+            break
 
-    # 1단계: 모든 STUN 서버에 동시 전송
-    for host, port in server_list:
         packet, txn_id = _build_binding_request()
         try:
             addr_info = await loop.getaddrinfo(host, port,
@@ -218,43 +212,22 @@ async def stun_detect_nat_type(sock: socket.socket,
             if not addr_info:
                 continue
             server_addr = addr_info[0][4]
+
             sock.sendto(packet, server_addr)
-            txn_map[txn_id] = host
-        except Exception as e:
-            logger.debug(f"[STUN-NAT] {host}:{port} 전송 실패: {e}")
-            continue
 
-    if not txn_map:
-        return ("unknown", ("", 0), None)
+            try:
+                data = await asyncio.wait_for(
+                    loop.sock_recv(sock, 1024), timeout=timeout)
+            except asyncio.TimeoutError:
+                continue
 
-    # 2단계: 응답 수집 (2개 이상 또는 타임아웃까지)
-    deadline = asyncio.get_event_loop().time() + timeout
+            result = _parse_binding_response(data, txn_id)
+            if result:
+                results.append(result)
+                logger.debug(f"[STUN-NAT] {host}: {result[0]}:{result[1]}")
 
-    while len(results) < 2:
-        remaining = deadline - asyncio.get_event_loop().time()
-        if remaining <= 0:
-            break
-        try:
-            data = await asyncio.wait_for(
-                loop.sock_recv(sock, 1024), timeout=remaining)
-        except asyncio.TimeoutError:
-            break
         except Exception:
-            break
-
-        # 수신된 패킷에서 txn_id 추출하여 매칭
-        if len(data) < 20:
             continue
-        resp_txn = data[8:20]
-        server_host = txn_map.get(resp_txn)
-        if not server_host or server_host in seen_servers:
-            continue
-
-        result = _parse_binding_response(data, resp_txn)
-        if result:
-            results.append(result)
-            seen_servers.add(server_host)
-            logger.debug(f"[STUN-NAT] {server_host}: {result[0]}:{result[1]}")
 
     if len(results) == 0:
         return ("unknown", ("", 0), None)

@@ -87,7 +87,6 @@ class AgentServer(QObject):
     file_complete = pyqtSignal(str, str)               # agent_id, remote_path
     command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
     connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
-    agent_info_received = pyqtSignal(str, dict)        # agent_id, info_dict (system_info 수신)
     update_status_received = pyqtSignal(str, dict)     # agent_id, status_dict
     latency_measured = pyqtSignal(str, int)             # agent_id, ms
     monitors_received = pyqtSignal(str, list)           # agent_id, monitors_list
@@ -239,19 +238,15 @@ class AgentServer(QObject):
                     asyncio.run_coroutine_threadsafe(
                         self._close_connection(agent_id), self._loop
                     ).result(timeout=3)
-                except (TimeoutError, RuntimeError) as e:
-                    logger.debug(f"[P2P] {agent_id} 종료 중 연결 해제 실패: {type(e).__name__}")
-                except Exception as e:
-                    logger.debug(f"[P2P] {agent_id} 종료 중 예외: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
 
         # 릴레이 연결 해제
         if self._relay_ws and self._loop and self._loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._relay_ws.close(), self._loop)
-            except RuntimeError:
-                logger.debug("[Relay] 종료 중 릴레이 해제 실패: 이벤트 루프 종료")
-            except Exception as e:
-                logger.debug(f"[Relay] 종료 중 릴레이 해제 실패: {type(e).__name__}")
+            except Exception:
+                pass
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -477,18 +472,14 @@ class AgentServer(QObject):
             prefixed = _pad_agent_id(agent_id) + data
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(prefixed), self._loop)
-            except RuntimeError:
-                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
-            except Exception as e:
-                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
+            except Exception:
+                pass
         else:
             # P2P: 직접 전송 (prefix 없음)
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(data), self._loop)
-            except RuntimeError:
-                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
-            except Exception as e:
-                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
+            except Exception:
+                pass
 
     async def _send_file_async(self, agent_id: str, filepath: str):
         """파일 전송 코루틴"""
@@ -561,10 +552,7 @@ class AgentServer(QObject):
                 pass
 
     async def _connect_cascade(self, agent_id: str):
-        """릴레이 우선 즉시 연결 → 백그라운드 P2P 업그레이드 (TeamViewer 방식)
-
-        포트포워딩 없이도 즉시 연결되며, 가능하면 P2P로 자동 전환.
-        """
+        """WAN → UDP홀펀칭 → 릴레이 순서로 연결 시도"""
         conn = self._connections.get(agent_id)
         if not conn:
             return
@@ -574,41 +562,12 @@ class AgentServer(QObject):
             return
 
         conn._connecting = True
-        logger.info(f"[P2P] {agent_id} 연결 시작 (릴레이 우선 → P2P 백그라운드 업그레이드)")
+        logger.info(f"[P2P] {agent_id} 연결 시도 시작 ("
+                     f"WAN={conn.ip_public or 'N/A'}, port={conn.ws_port})")
 
-        # ── 1단계: 릴레이 즉시 연결 (포트포워딩 불필요) ──
-        # relay가 아직 접속 안 된 경우 최대 3초 대기
-        if not self._relay_ws:
-            logger.info(f"[P2P] {agent_id} 릴레이 대기 중...")
-            for _ in range(30):
-                await asyncio.sleep(0.1)
-                if self._relay_ws or conn.mode != ConnectionMode.DISCONNECTED:
-                    break
-
-        # agent_connected 핸들러가 이미 연결했으면 완료
-        if conn.mode != ConnectionMode.DISCONNECTED:
-            conn._connecting = False
-            return
-
-        # 릴레이 즉시 연결
-        if self._relay_ws:
-            conn.ws = self._relay_ws
-            conn.mode = ConnectionMode.RELAY
-            conn._connecting = False
-            logger.info(f"[P2P] {agent_id} ★ 릴레이 즉시 연결 "
-                        f"(백그라운드 P2P 업그레이드 5초 후 시작)")
-            self.agent_connected.emit(agent_id, conn.ip_public or "relay")
-            self.connection_mode_changed.emit(agent_id, "relay")
-            # 에이전트에 시스템 정보 요청 (DB 없이도 정보 표시 가능)
-            self._send_to_agent(agent_id, {'type': 'request_info'})
-            # 백그라운드 P2P 업그레이드 (5초 후 시작, 주기적 재시도)
-            asyncio.ensure_future(self._delayed_p2p_upgrade(agent_id, delay=5))
-            return
-
-        # ── 2단계: 릴레이 불가 시 WAN 직접 시도 (폴백) ──
+        # 1단계: WAN (ip1) 직접 연결
         if conn.ip_public:
-            logger.info(f"[P2P] {agent_id} 릴레이 불가 → WAN 직접 시도: "
-                        f"{conn.ip_public}:{conn.ws_port}")
+            logger.info(f"[P2P] {agent_id} 1단계 WAN 시도: {conn.ip_public}:{conn.ws_port}")
             result = await self._try_p2p_connect(
                 f"ws://{conn.ip_public}:{conn.ws_port}",
                 timeout=self._timeout_wan,
@@ -619,54 +578,75 @@ class AgentServer(QObject):
                 conn.mode = ConnectionMode.WAN
                 conn.info = auth_info
                 conn._connecting = False
-                logger.info(f"[P2P] {agent_id} ★ WAN 연결 성공: "
-                            f"{conn.ip_public}:{conn.ws_port}")
+                logger.info(f"[P2P] {agent_id} WAN 연결 성공: {conn.ip_public}:{conn.ws_port}")
                 self.agent_connected.emit(agent_id, conn.ip_public)
                 self.connection_mode_changed.emit(agent_id, "wan")
                 conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
                 return
+            logger.info(f"[P2P] {agent_id} WAN 연결 실패 (포트 미개방 또는 NAT)")
+        else:
+            logger.info(f"[P2P] {agent_id} WAN 스킵 (공인IP 없음)")
+
+        # 릴레이 핸들러가 이미 연결했으면 스킵
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
+            return
+
+        # 릴레이 연결 대기 (릴레이가 아직 접속 안 된 경우 최대 3초 대기)
+        if not self._relay_ws:
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if self._relay_ws or conn.mode != ConnectionMode.DISCONNECTED:
+                    break
+
+        # 릴레이 핸들러가 이미 연결했으면 스킵
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
+            return
+
+        # 2단계: UDP 홀펀칭 P2P (포트포워딩 불필요)
+        if self._relay_ws:
+            udp_ch = await self._try_udp_punch(agent_id)
+            if udp_ch:
+                conn.udp_channel = udp_ch
+                conn.mode = ConnectionMode.UDP_P2P
+                conn._connecting = False
+                logger.info(f"[P2P] {agent_id} ★ UDP 홀펀칭 P2P 연결 성공!")
+                # 시그널 전에 recv/ping 루프 시작 (즉시 수신 가능하게)
+                udp_ch.start(
+                    on_control=lambda msg, aid=agent_id: self._on_udp_control(aid, msg),
+                    on_video=lambda t, d, aid=agent_id: self._on_udp_video(aid, t, d),
+                )
+                self.agent_connected.emit(agent_id, conn.ip_public or "udp_p2p")
+                self.connection_mode_changed.emit(agent_id, "udp_p2p")
+                return
+
+        # 릴레이 핸들러가 이미 연결했으면 스킵
+        if conn.mode != ConnectionMode.DISCONNECTED:
+            conn._connecting = False
+            return
+
+        # 3단계: 서버 릴레이 폴백
+        if self._relay_ws:
+            conn.ws = self._relay_ws
+            conn.mode = ConnectionMode.RELAY
+            conn._connecting = False
+            logger.info(f"[P2P] {agent_id} 릴레이 폴백 (직접 연결 불가)")
+            self.agent_connected.emit(agent_id, "relay")
+            self.connection_mode_changed.emit(agent_id, "relay")
+            return
 
         # 전부 실패
         conn.mode = ConnectionMode.DISCONNECTED
         conn._connecting = False
-        logger.warning(f"[P2P] {agent_id} 연결 실패 (릴레이/WAN 모두 불가)")
+        logger.warning(f"[P2P] {agent_id} 연결 실패 (WAN/UDP/릴레이)")
         self.agent_disconnected.emit(agent_id)
 
     # P2P 업그레이드 실패 후 재시도 대기 시간 (초)
-    _UPGRADE_COOLDOWN = 30
-    # 릴레이 상태에서 WAN 업그레이드 주기적 시도 간격 (초)
-    _UPGRADE_RETRY_INTERVAL = 60
-
-    async def _delayed_p2p_upgrade(self, agent_id: str, delay: float = 30):
-        """릴레이 연결 후 지연 P2P 업그레이드 시도 + 주기적 재시도"""
-        try:
-            await asyncio.sleep(delay)
-            conn = self._connections.get(agent_id)
-            if conn and conn.mode == ConnectionMode.RELAY and not conn._upgrading:
-                logger.info(f"[P2P] {agent_id} 자동 P2P 업그레이드 시도 ({delay}초 경과, UDP→WAN)")
-                await self._try_p2p_upgrade(agent_id)
-        except asyncio.CancelledError:
-            return
-
-        # 릴레이 상태 유지 시 주기적으로 WAN 업그레이드 재시도
-        while True:
-            try:
-                await asyncio.sleep(self._UPGRADE_RETRY_INTERVAL)
-                conn = self._connections.get(agent_id)
-                if not conn or conn.mode != ConnectionMode.RELAY:
-                    break  # 연결 해제 또는 이미 업그레이드됨
-                if not conn._upgrading:
-                    logger.info(f"[P2P] {agent_id} 주기적 P2P 업그레이드 시도 (UDP→WAN)")
-                    await self._try_p2p_upgrade(agent_id)
-            except asyncio.CancelledError:
-                return
+    _UPGRADE_COOLDOWN = 120
 
     async def _try_p2p_upgrade(self, agent_id: str):
-        """릴레이 → P2P 직접 연결 업그레이드 (UDP 우선, WAN TCP 보조)
-
-        UDP 홀펀칭은 포트포워딩 불필요 → 우선 시도.
-        WAN TCP는 포트포워딩 필요 → 보조적으로 시도.
-        """
+        """릴레이 → P2P 직접 연결 업그레이드 시도 (실패 시 릴레이 유지)"""
         conn = self._connections.get(agent_id)
         if not conn or conn.mode != ConnectionMode.RELAY:
             return
@@ -681,14 +661,29 @@ class AgentServer(QObject):
 
         conn._upgrading = True
         try:
-            # 1단계: UDP 홀펀칭 (포트포워딩 불필요 — 우선!)
+            # 1단계: WAN 시도
+            if conn.ip_public:
+                result = await self._try_p2p_connect(
+                    f"ws://{conn.ip_public}:{conn.ws_port}",
+                    timeout=self._timeout_wan,
+                )
+                if result:
+                    ws, auth_info = result
+                    conn.ws = ws
+                    conn.mode = ConnectionMode.WAN
+                    conn.info = auth_info
+                    logger.info(f"[P2P] {agent_id} 릴레이→WAN 업그레이드: {conn.ip_public}:{conn.ws_port}")
+                    self.connection_mode_changed.emit(agent_id, "wan")
+                    conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
+                    return
+
+            # 2단계: UDP 홀펀칭 시도
             if self._relay_ws:
-                logger.info(f"[P2P] {agent_id} P2P 업그레이드: UDP 홀펀칭 시도")
                 udp_ch = await self._try_udp_punch(agent_id)
                 if udp_ch:
                     conn.udp_channel = udp_ch
                     conn.mode = ConnectionMode.UDP_P2P
-                    logger.info(f"[P2P] {agent_id} ★ 릴레이→UDP P2P 업그레이드 성공!")
+                    logger.info(f"[P2P] {agent_id} 릴레이→UDP P2P 업그레이드 성공!")
                     # 시그널 전에 recv/ping 루프 시작
                     udp_ch.start(
                         on_control=lambda msg, aid=agent_id: self._on_udp_control(aid, msg),
@@ -704,30 +699,10 @@ class AgentServer(QObject):
                     })
                     return
 
-            # 2단계: WAN TCP (포트포워딩 필요 — 보조)
-            if conn.ip_public:
-                logger.info(f"[P2P] {agent_id} P2P 업그레이드: WAN TCP 시도 "
-                            f"{conn.ip_public}:{conn.ws_port}")
-                result = await self._try_p2p_connect(
-                    f"ws://{conn.ip_public}:{conn.ws_port}",
-                    timeout=self._timeout_wan,
-                )
-                if result:
-                    ws, auth_info = result
-                    conn.ws = ws
-                    conn.mode = ConnectionMode.WAN
-                    conn.info = auth_info
-                    logger.info(f"[P2P] {agent_id} ★ 릴레이→WAN 업그레이드: "
-                                f"{conn.ip_public}:{conn.ws_port}")
-                    self.connection_mode_changed.emit(agent_id, "wan")
-                    conn._recv_task = asyncio.create_task(self._recv_loop(agent_id))
-                    return
-
             # P2P 실패 — 릴레이 유지, 쿨다운 시작
             conn._last_upgrade_fail = _time.time()
-            logger.info(f"[P2P] {agent_id} P2P 업그레이드 실패 — "
-                         f"{self._UPGRADE_COOLDOWN}초 후 재시도 "
-                         f"(ip={conn.ip_public or 'N/A'}:{conn.ws_port})")
+            logger.info(f"[P2P] {agent_id} P2P 업그레이드 실패 — {self._UPGRADE_COOLDOWN}초 쿨다운 "
+                         f"(WAN={conn.ip_public or 'N/A'}:{conn.ws_port})")
         finally:
             conn._upgrading = False
 
@@ -912,7 +887,7 @@ class AgentServer(QObject):
     # ==================== 서버 릴레이 (폴백) ====================
 
     async def _relay_connect_loop(self):
-        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결 — 지수 백오프)"""
+        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결)"""
         if not self._server_url or not self._token:
             return
 
@@ -924,9 +899,6 @@ class AgentServer(QObject):
         elif not base.startswith(('ws://', 'wss://')):
             base = 'ws://' + base
         ws_url = f"{base}/ws/manager?token={self._token}"
-
-        retry_delay = 1  # 초기 1초, 최대 60초까지 지수 백오프
-        MAX_RETRY_DELAY = 60
 
         while not self._stop_event.is_set():
             try:
@@ -940,7 +912,6 @@ class AgentServer(QObject):
                 ) as ws:
                     self._relay_ws = ws
                     logger.info("[P2P/Relay] 서버 릴레이 접속 성공 (폴백 대기)")
-                    retry_delay = 1  # 연결 성공 시 백오프 리셋
 
                     async for message in ws:
                         if self._stop_event.is_set():
@@ -956,7 +927,7 @@ class AgentServer(QObject):
                 return
             except Exception as e:
                 if not self._stop_event.is_set():
-                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {type(e).__name__}: {e}")
+                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {e}")
             finally:
                 self._relay_ws = None
                 # 릴레이 모드인 에이전트들 연결 해제
@@ -967,13 +938,10 @@ class AgentServer(QObject):
                         self.agent_disconnected.emit(agent_id)
 
             if not self._stop_event.is_set():
-                logger.debug(f"[P2P/Relay] {retry_delay}초 후 재연결...")
-                # 0.1초 단위로 대기 (종료 이벤트 빠른 감지)
-                for _ in range(int(retry_delay * 10)):
+                for _ in range(50):
                     if self._stop_event.is_set():
                         return
                     await asyncio.sleep(0.1)
-                retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
 
     def _handle_relay_text(self, raw: str):
         """서버 릴레이 JSON 처리 (기존 v2.x 프로토콜)"""
@@ -1007,8 +975,6 @@ class AgentServer(QObject):
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, msg.get('ip', ''))
                     self.connection_mode_changed.emit(agent_id, "relay")
-                    # 에이전트에 시스템 정보 요청 (하드웨어 등)
-                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} (릴레이)")
             return
 
@@ -1029,22 +995,19 @@ class AgentServer(QObject):
                     conn.ws_port = ws_port
 
                 if conn._connecting:
-                    # _connect_cascade 실행 중 — IP만 업데이트 (cascade가 대기 후 WAN 재시도함)
-                    logger.info(f"[P2P/Relay] {agent_id} 공인IP 수신 (cascade 대기 중 → WAN 재시도 예정): "
-                                f"real_ip={real_ip or 'N/A'}, ws_port={ws_port}")
+                    # _connect_cascade 실행 중 — IP만 업데이트하고 중복 시도 안 함
+                    logger.debug(f"[P2P/Relay] {agent_id} IP 업데이트 (cascade 진행 중): "
+                                 f"real_ip={real_ip or 'N/A'}")
                 elif conn.mode == ConnectionMode.DISCONNECTED:
-                    # 새 에이전트 — 릴레이 설정 + WAN 업그레이드 자동 시도
+                    # 새 에이전트 — 릴레이 설정 + P2P 업그레이드 시도
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} "
                                 f"(real_ip={real_ip or 'N/A'}, ws_port={ws_port})")
                     conn.ws = self._relay_ws
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, real_ip or '')
                     self.connection_mode_changed.emit(agent_id, "relay")
-                    # 에이전트에 시스템 정보 요청
-                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     if real_ip and not conn._upgrading:
-                        # 즉시 WAN 업그레이드 + 실패 시 주기적 재시도
-                        asyncio.ensure_future(self._delayed_p2p_upgrade(agent_id, delay=3))
+                        asyncio.ensure_future(self._try_p2p_upgrade(agent_id))
                 elif conn.mode == ConnectionMode.RELAY and real_ip:
                     # 이미 릴레이 연결인데 real_ip가 새로 왔으면 업그레이드 시도
                     if not conn._upgrading:
@@ -1101,33 +1064,6 @@ class AgentServer(QObject):
             stderr = msg.get('stderr', '')
             returncode = msg.get('returncode', -1)
             self.command_result.emit(agent_id, command, stdout if stdout else stderr, returncode)
-        elif msg_type == 'system_info':
-            # 에이전트가 보낸 시스템 정보 (릴레이 경유)
-            conn = self._connections.get(agent_id)
-            if conn:
-                info_data = {
-                    'hostname': msg.get('hostname', ''),
-                    'os_info': msg.get('os_info', ''),
-                    'ip': msg.get('ip', ''),
-                    'ip_public': msg.get('ip_public', ''),
-                    'mac_address': msg.get('mac_address', ''),
-                    'screen_width': msg.get('screen_width', 0),
-                    'screen_height': msg.get('screen_height', 0),
-                    'agent_version': msg.get('agent_version', ''),
-                    'cpu_model': msg.get('cpu_model', ''),
-                    'cpu_cores': msg.get('cpu_cores', 0),
-                    'ram_gb': msg.get('ram_gb', 0.0),
-                    'motherboard': msg.get('motherboard', ''),
-                    'gpu_model': msg.get('gpu_model', ''),
-                }
-                conn.info.update(info_data)
-                if msg.get('ip_public'):
-                    conn.ip_public = msg['ip_public']
-                logger.info(f"[P2P/Relay] {agent_id} system_info 수신: "
-                            f"hostname={info_data['hostname']}, "
-                            f"ip_public={info_data['ip_public'] or 'N/A'}, "
-                            f"version={info_data['agent_version']}")
-                self.agent_info_received.emit(agent_id, info_data)
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
 

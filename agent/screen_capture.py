@@ -211,8 +211,7 @@ class ScreenCapture:
 
             buf = io.BytesIO()
             # v2.1.1: optimize=False (CPU 절감, 스트리밍 속도 우선)
-            # v3.2.1: subsampling=0 (4:4:4) — 텍스트/UI 선명도 대폭 개선
-            img.save(buf, format='JPEG', quality=quality, subsampling=0)
+            img.save(buf, format='JPEG', quality=quality)
             return buf.getvalue()
 
         except Exception as e:
