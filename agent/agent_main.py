@@ -828,6 +828,7 @@ class WellcomAgent:
 
         에이전트가 서버에 먼저 연결 → 매니저가 서버 릴레이를 통해 에이전트 제어.
         TeamViewer/AnyDesk 방식 — 어떤 NAT/방화벽에서도 동작.
+        재연결 시 지수 백오프: 1→2→4→8→...→60초
         """
         if not self.api_client or not self.api_client.token:
             return
@@ -840,6 +841,9 @@ class WellcomAgent:
         elif not base.startswith(('ws://', 'wss://')):
             base = 'ws://' + base
         ws_url = f"{base}/ws/agent?token={self.api_client.token}"
+
+        retry_delay = 1  # 초기 1초, 최대 60초까지 지수 백오프
+        MAX_RETRY_DELAY = 60
 
         while self._running:
             try:
@@ -865,6 +869,7 @@ class WellcomAgent:
                     logger.info("[Relay] 서버 릴레이 연결 성공 — 매니저 폴백 대기 중")
                     self._relay_connected = True
                     self._update_tray_icon()
+                    retry_delay = 1  # 연결 성공 시 백오프 리셋
 
                     # 시스템 정보 즉시 전송 (매니저가 DB 없이도 정보 표시 가능)
                     try:
@@ -899,12 +904,13 @@ class WellcomAgent:
                 return
             except Exception as e:
                 if self._running:
-                    logger.warning(f"[Relay] 연결 끊김: {type(e).__name__} — 30초 후 재연결")
+                    logger.warning(f"[Relay] 연결 끊김: {type(e).__name__} — {retry_delay}초 후 재연결")
             self._relay_connected = False
             self._update_tray_icon()
             if self._running:
                 try:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
                 except asyncio.CancelledError:
                     return
 

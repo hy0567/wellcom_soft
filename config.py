@@ -5,6 +5,8 @@ WellcomSOFT 설정
 import sys
 import os
 import json
+import base64
+import hashlib
 from typing import Any, Optional
 
 
@@ -241,6 +243,66 @@ class Settings:
         else:
             self._data = {}
             self.save()
+
+    # ==================== 토큰 암호화 ====================
+
+    _MACHINE_KEY: Optional[bytes] = None
+
+    @staticmethod
+    def _get_machine_key() -> bytes:
+        """머신 고유 키 생성 (사용자+호스트+MAC 기반)"""
+        if Settings._MACHINE_KEY:
+            return Settings._MACHINE_KEY
+        import socket
+        import uuid
+        raw = f"{os.getlogin()}:{socket.gethostname()}:{uuid.getnode()}"
+        Settings._MACHINE_KEY = hashlib.sha256(raw.encode()).digest()
+        return Settings._MACHINE_KEY
+
+    @staticmethod
+    def _xor_crypt(data: bytes, key: bytes) -> bytes:
+        """XOR 기반 암호화/복호화 (대칭)"""
+        key_len = len(key)
+        return bytes(b ^ key[i % key_len] for i, b in enumerate(data))
+
+    def save_token(self, token: str):
+        """토큰을 암호화하여 저장"""
+        if not token:
+            self.set('server.token', '')
+            self.set('server._token_enc', '')
+            return
+        key = self._get_machine_key()
+        encrypted = self._xor_crypt(token.encode('utf-8'), key)
+        encoded = base64.b64encode(encrypted).decode('ascii')
+        self.set('server._token_enc', encoded, auto_save=False)
+        self.set('server.token', '', auto_save=True)  # 평문 제거
+
+    def load_token(self) -> str:
+        """저장된 토큰 복호화하여 반환"""
+        # 1) 암호화된 토큰 시도
+        encoded = self.get('server._token_enc', '')
+        if encoded:
+            try:
+                key = self._get_machine_key()
+                encrypted = base64.b64decode(encoded)
+                token = self._xor_crypt(encrypted, key).decode('utf-8')
+                if token:
+                    return token
+            except Exception:
+                pass
+
+        # 2) 레거시: 평문 토큰 마이그레이션
+        plain = self.get('server.token', '')
+        if plain:
+            self.save_token(plain)  # 자동 암호화 마이그레이션
+            return plain
+
+        return ''
+
+    def clear_token(self):
+        """토큰 완전 삭제"""
+        self.set('server.token', '', auto_save=False)
+        self.set('server._token_enc', '', auto_save=True)
 
 
 # 싱글톤 인스턴스

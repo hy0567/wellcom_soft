@@ -239,15 +239,19 @@ class AgentServer(QObject):
                     asyncio.run_coroutine_threadsafe(
                         self._close_connection(agent_id), self._loop
                     ).result(timeout=3)
-                except Exception:
-                    pass
+                except (TimeoutError, RuntimeError) as e:
+                    logger.debug(f"[P2P] {agent_id} 종료 중 연결 해제 실패: {type(e).__name__}")
+                except Exception as e:
+                    logger.debug(f"[P2P] {agent_id} 종료 중 예외: {type(e).__name__}: {e}")
 
         # 릴레이 연결 해제
         if self._relay_ws and self._loop and self._loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._relay_ws.close(), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("[Relay] 종료 중 릴레이 해제 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[Relay] 종료 중 릴레이 해제 실패: {type(e).__name__}")
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -473,14 +477,18 @@ class AgentServer(QObject):
             prefixed = _pad_agent_id(agent_id) + data
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(prefixed), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
         else:
             # P2P: 직접 전송 (prefix 없음)
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(data), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
 
     async def _send_file_async(self, agent_id: str, filepath: str):
         """파일 전송 코루틴"""
@@ -904,7 +912,7 @@ class AgentServer(QObject):
     # ==================== 서버 릴레이 (폴백) ====================
 
     async def _relay_connect_loop(self):
-        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결)"""
+        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결 — 지수 백오프)"""
         if not self._server_url or not self._token:
             return
 
@@ -916,6 +924,9 @@ class AgentServer(QObject):
         elif not base.startswith(('ws://', 'wss://')):
             base = 'ws://' + base
         ws_url = f"{base}/ws/manager?token={self._token}"
+
+        retry_delay = 1  # 초기 1초, 최대 60초까지 지수 백오프
+        MAX_RETRY_DELAY = 60
 
         while not self._stop_event.is_set():
             try:
@@ -929,6 +940,7 @@ class AgentServer(QObject):
                 ) as ws:
                     self._relay_ws = ws
                     logger.info("[P2P/Relay] 서버 릴레이 접속 성공 (폴백 대기)")
+                    retry_delay = 1  # 연결 성공 시 백오프 리셋
 
                     async for message in ws:
                         if self._stop_event.is_set():
@@ -944,7 +956,7 @@ class AgentServer(QObject):
                 return
             except Exception as e:
                 if not self._stop_event.is_set():
-                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {e}")
+                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {type(e).__name__}: {e}")
             finally:
                 self._relay_ws = None
                 # 릴레이 모드인 에이전트들 연결 해제
@@ -955,10 +967,13 @@ class AgentServer(QObject):
                         self.agent_disconnected.emit(agent_id)
 
             if not self._stop_event.is_set():
-                for _ in range(50):
+                logger.debug(f"[P2P/Relay] {retry_delay}초 후 재연결...")
+                # 0.1초 단위로 대기 (종료 이벤트 빠른 감지)
+                for _ in range(int(retry_delay * 10)):
                     if self._stop_event.is_set():
                         return
                     await asyncio.sleep(0.1)
+                retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
 
     def _handle_relay_text(self, raw: str):
         """서버 릴레이 JSON 처리 (기존 v2.x 프로토콜)"""
