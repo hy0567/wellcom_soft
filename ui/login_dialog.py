@@ -270,12 +270,14 @@ class LoginDialog(QDialog):
     def showEvent(self, event):
         """다이얼로그 표시 후 자동 로그인 시도
 
-        생성자에서 accept()을 호출하면 exec() 전이라 동작이 불안정하므로,
-        showEvent에서 QTimer.singleShot(0)으로 이벤트 루프 시작 후 시도.
+        자동 로그인 대기 중이면 다이얼로그를 숨긴 상태로 시도.
+        실패 시에만 다이얼로그를 표시.
         """
         super().showEvent(event)
         if self._auto_login_pending:
             self._auto_login_pending = False
+            # 자동 로그인 중에는 다이얼로그 숨김 (깜빡임 방지)
+            self.hide()
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(0, self._try_auto_login)
 
@@ -294,6 +296,8 @@ class LoginDialog(QDialog):
         except Exception as e:
             logger.warning(f"자동 로그인 실패: {type(e).__name__}: {e}")
         logger.debug("자동 로그인 실패 — 수동 로그인 대기")
+        # 자동 로그인 실패 → 다이얼로그 다시 표시
+        self.show()
 
     def _do_login(self):
         """로그인 실행"""

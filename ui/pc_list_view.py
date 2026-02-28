@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QLineEdit, QLabel, QFrame, QAbstractItemView,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont, QMouseEvent
@@ -31,7 +32,7 @@ _COLOR_ONLINE = QColor('#22c55e')
 _COLOR_ERROR = QColor('#ef4444')
 _COLOR_OFFLINE = QColor('#9ca3af')
 
-# 컬럼 정의
+# 컬럼 정의 (업데이트 컬럼 추가)
 COLUMNS = [
     ('상태', 50),
     ('PC이름', 120),
@@ -44,10 +45,28 @@ COLUMNS = [
     ('RAM', 50),
     ('GPU', 140),
     ('모드', 60),
-    ('버전', 60),
+    ('버전', 70),
+    ('업데이트', 65),
     ('그룹', 70),
     ('메모', 120),
 ]
+
+# 컬럼 인덱스 상수
+COL_STATUS = 0
+COL_NAME = 1
+COL_HOSTNAME = 2
+COL_IP = 3
+COL_PUBLIC_IP = 4
+COL_OS = 5
+COL_CPU = 6
+COL_CORES = 7
+COL_RAM = 8
+COL_GPU = 9
+COL_MODE = 10
+COL_VERSION = 11
+COL_UPDATE = 12
+COL_GROUP = 13
+COL_MEMO = 14
 
 
 def _theme():
@@ -88,6 +107,7 @@ class PCListView(QWidget):
         self.agent_server = agent_server
         self._selected_pcs: set = set()
         self._row_map: Dict[str, int] = {}  # pc_name → row index
+        self._update_status: Dict[str, dict] = {}  # agent_id → {status, ...}
 
         self._setup_ui()
         self._connect_signals()
@@ -115,6 +135,7 @@ class PCListView(QWidget):
                          border: 1px solid {c['input_border']}; border-radius: 4px;
                          padding: 3px 8px; font-size: 11px; }}
             QLineEdit:focus {{ border: 1px solid {c['input_focus']}; }}
+            QPushButton {{ font-size: 11px; padding: 3px 10px; border-radius: 4px; }}
         """)
         bar_layout = QHBoxLayout(bar)
         bar_layout.setContentsMargins(10, 4, 10, 4)
@@ -126,6 +147,19 @@ class PCListView(QWidget):
         self._search_input.setClearButtonEnabled(True)
         self._search_input.textChanged.connect(self._on_filter_changed)
         bar_layout.addWidget(self._search_input)
+
+        # 전체 업데이트 버튼
+        self._update_all_btn = QPushButton("전체 업데이트")
+        self._update_all_btn.setFixedHeight(24)
+        self._update_all_btn.setStyleSheet(
+            "QPushButton { background: #f97316; color: white; border: none; "
+            "border-radius: 4px; font-weight: bold; padding: 3px 12px; }"
+            "QPushButton:hover { background: #ea580c; }"
+            "QPushButton:disabled { background: #9ca3af; }"
+        )
+        self._update_all_btn.setToolTip("온라인이고 업데이트가 필요한 모든 에이전트를 업데이트")
+        self._update_all_btn.clicked.connect(self._on_update_all)
+        bar_layout.addWidget(self._update_all_btn)
 
         bar_layout.addStretch()
 
@@ -205,6 +239,8 @@ class PCListView(QWidget):
             lambda agent_id, mode: self._on_agent_event(agent_id))
         self.agent_server.agent_info_received.connect(
             lambda agent_id, info: self._on_agent_event(agent_id))
+        # 업데이트 상태 수신
+        self.agent_server.update_status_received.connect(self._on_update_status)
 
     # ==================== 테이블 구성 ====================
 
@@ -252,46 +288,45 @@ class PCListView(QWidget):
         item.setForeground(QBrush(status_color))
         item.setFont(QFont("", 11, QFont.Weight.Bold))
         item.setData(Qt.ItemDataRole.UserRole, pc.name)
-        self._table.setItem(row, 0, item)
+        self._table.setItem(row, COL_STATUS, item)
 
         # PC이름
         name_item = QTableWidgetItem(pc.name)
         name_item.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
         name_item.setData(Qt.ItemDataRole.UserRole, pc.name)
-        self._table.setItem(row, 1, name_item)
+        self._table.setItem(row, COL_NAME, name_item)
 
         # 호스트명
-        self._set_text_item(row, 2, getattr(info, 'hostname', ''), pc.name)
+        self._set_text_item(row, COL_HOSTNAME, getattr(info, 'hostname', ''), pc.name)
 
         # IP
-        self._set_text_item(row, 3, getattr(info, 'ip', ''), pc.name)
+        self._set_text_item(row, COL_IP, getattr(info, 'ip', ''), pc.name)
 
         # 공인IP
-        self._set_text_item(row, 4, getattr(info, 'public_ip', ''), pc.name)
+        self._set_text_item(row, COL_PUBLIC_IP, getattr(info, 'public_ip', ''), pc.name)
 
         # OS
         os_info = getattr(info, 'os_info', '')
-        # 간결하게 표시
         if os_info:
             parts = os_info.split()
             if len(parts) > 3:
                 os_info = ' '.join(parts[:3])
-        self._set_text_item(row, 5, os_info, pc.name)
+        self._set_text_item(row, COL_OS, os_info, pc.name)
 
         # CPU
-        self._set_text_item(row, 6, getattr(info, 'cpu_model', ''), pc.name)
+        self._set_text_item(row, COL_CPU, getattr(info, 'cpu_model', ''), pc.name)
 
         # 코어
         cores = getattr(info, 'cpu_cores', 0)
-        self._set_text_item(row, 7, str(cores) if cores else '', pc.name)
+        self._set_text_item(row, COL_CORES, str(cores) if cores else '', pc.name)
 
         # RAM
         ram = getattr(info, 'ram_gb', 0.0)
         ram_text = f"{ram}GB" if ram else ''
-        self._set_text_item(row, 8, ram_text, pc.name)
+        self._set_text_item(row, COL_RAM, ram_text, pc.name)
 
         # GPU
-        self._set_text_item(row, 9, getattr(info, 'gpu_model', ''), pc.name)
+        self._set_text_item(row, COL_GPU, getattr(info, 'gpu_model', ''), pc.name)
 
         # 모드
         mode = getattr(info, 'connection_mode', '')
@@ -308,22 +343,60 @@ class PCListView(QWidget):
             mode_item.setForeground(QBrush(mode_colors.get(mode_display, QColor('#9ca3af'))))
             mode_item.setFont(QFont("", 10, QFont.Weight.Bold))
         mode_item.setData(Qt.ItemDataRole.UserRole, pc.name)
-        self._table.setItem(row, 10, mode_item)
+        self._table.setItem(row, COL_MODE, mode_item)
 
         # 버전
         version = getattr(info, 'agent_version', '')
+        needs_update = bool(version and MANAGER_VERSION and version != MANAGER_VERSION)
         ver_item = QTableWidgetItem(version)
-        if version and MANAGER_VERSION and version != MANAGER_VERSION:
+        if needs_update:
             ver_item.setForeground(QBrush(QColor('#f97316')))
             ver_item.setToolTip(f"최신: {MANAGER_VERSION}")
         ver_item.setData(Qt.ItemDataRole.UserRole, pc.name)
-        self._table.setItem(row, 11, ver_item)
+        self._table.setItem(row, COL_VERSION, ver_item)
+
+        # 업데이트 버튼 셀
+        update_text = ''
+        update_color = QColor('#9ca3af')
+        agent_id = pc.agent_id
+        us = self._update_status.get(agent_id, {})
+        us_status = us.get('status', '')
+
+        if us_status == 'downloading':
+            pct = us.get('progress', 0)
+            update_text = f'{pct}%'
+            update_color = QColor('#3b82f6')
+        elif us_status == 'checking':
+            update_text = '확인중'
+            update_color = QColor('#3b82f6')
+        elif us_status == 'restarting':
+            update_text = '재시작'
+            update_color = QColor('#22c55e')
+        elif us_status == 'up_to_date':
+            update_text = '최신'
+            update_color = QColor('#22c55e')
+        elif us_status == 'failed':
+            update_text = '실패'
+            update_color = QColor('#ef4444')
+        elif needs_update and pc.is_online:
+            update_text = '업데이트'
+            update_color = QColor('#f97316')
+        elif version and version == MANAGER_VERSION:
+            update_text = '최신'
+            update_color = QColor('#22c55e')
+
+        up_item = QTableWidgetItem(update_text)
+        up_item.setForeground(QBrush(update_color))
+        up_item.setFont(QFont("", 10, QFont.Weight.Bold))
+        up_item.setData(Qt.ItemDataRole.UserRole, pc.name)
+        up_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, COL_UPDATE, up_item)
 
         # 그룹
-        self._set_text_item(row, 12, getattr(info, 'group', 'default'), pc.name)
+        self._set_text_item(row, COL_GROUP, getattr(info, 'group', 'default'), pc.name)
 
         # 메모
-        self._set_text_item(row, 13, getattr(info, 'memo', ''), pc.name)
+        self._set_text_item(row, COL_MEMO, getattr(info, 'memo', ''), pc.name)
 
         # 행 높이
         self._table.setRowHeight(row, 32)
@@ -337,11 +410,23 @@ class PCListView(QWidget):
     # ==================== 이벤트 핸들러 ====================
 
     def _on_double_click(self, index):
-        item = self._table.item(index.row(), 0)
-        if item:
-            pc_name = item.data(Qt.ItemDataRole.UserRole)
-            if pc_name:
-                self.open_viewer.emit(pc_name)
+        row = index.row()
+        col = index.column()
+
+        item = self._table.item(row, COL_STATUS)
+        if not item:
+            return
+        pc_name = item.data(Qt.ItemDataRole.UserRole)
+        if not pc_name:
+            return
+
+        # 업데이트 컬럼 더블클릭 → 업데이트 실행
+        if col == COL_UPDATE:
+            self._trigger_update(pc_name)
+            return
+
+        # 그 외 → 뷰어 열기
+        self.open_viewer.emit(pc_name)
 
     def _on_context_menu(self, pos):
         item = self._table.itemAt(pos)
@@ -373,7 +458,6 @@ class PCListView(QWidget):
             self._fill_row(row, pc)
             self._table.setSortingEnabled(True)
         else:
-            # 행이 없으면 전체 재구성
             self.rebuild_list()
 
     def _on_agent_event(self, agent_id: str):
@@ -381,6 +465,45 @@ class PCListView(QWidget):
         pc = self.pc_manager.get_pc_by_agent_id(agent_id)
         if pc:
             self._on_status_changed(pc.name)
+
+    def _on_update_status(self, agent_id: str, status_dict: dict):
+        """에이전트 업데이트 상태 수신"""
+        self._update_status[agent_id] = status_dict
+        status = status_dict.get('status', '')
+        pc = self.pc_manager.get_pc_by_agent_id(agent_id)
+        if pc:
+            pct = status_dict.get('progress', 0)
+            logger.info(f"[업데이트] {pc.name} 상태: {status}"
+                        + (f" ({pct}%)" if status == 'downloading' else ""))
+            self._on_status_changed(pc.name)
+
+    def _trigger_update(self, pc_name: str):
+        """단일 PC 업데이트 트리거"""
+        pc = self.pc_manager.get_pc(pc_name)
+        if not pc or not pc.is_online:
+            return
+        version = getattr(pc.info, 'agent_version', '')
+        if version and MANAGER_VERSION and version == MANAGER_VERSION:
+            return  # 이미 최신
+        logger.info(f"[업데이트] {pc_name} ({pc.agent_id}) 원격 업데이트 요청")
+        self._update_status[pc.agent_id] = {'status': 'checking'}
+        self._on_status_changed(pc_name)
+        self.agent_server.send_update_request(pc.agent_id)
+
+    def _on_update_all(self):
+        """온라인이고 업데이트 필요한 모든 에이전트 업데이트"""
+        count = 0
+        for pc in self.pc_manager.get_all_pcs():
+            if not pc.is_online:
+                continue
+            version = getattr(pc.info, 'agent_version', '')
+            if version and MANAGER_VERSION and version != MANAGER_VERSION:
+                self._trigger_update(pc.name)
+                count += 1
+        if count:
+            logger.info(f"[업데이트] 전체 업데이트 요청: {count}대")
+        else:
+            logger.info("[업데이트] 업데이트 필요한 에이전트 없음")
 
     def _refresh_statuses(self):
         """주기적 상태 갱신"""
