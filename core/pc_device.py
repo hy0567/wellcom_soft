@@ -88,11 +88,19 @@ class PCDevice:
         self.thumbnail_time = time.time()
 
     def mark_online(self, ws, remote_ip: str):
-        """에이전트 연결됨"""
+        """에이전트 연결됨
+
+        remote_ip가 'relay'이면 기존 내부IP를 유지하고 덮어쓰지 않음.
+        """
         self.agent_ws = ws
         self.status = PCStatus.ONLINE
         self.last_seen = time.time()
-        self.info.ip = remote_ip
+        # 'relay' 문자열이면 내부IP 보존 (system_info에서 업데이트됨)
+        if remote_ip and remote_ip != 'relay':
+            # 기존 내부IP가 있고, 새 IP가 공인IP(다른 대역)이면 보존
+            # system_info에서 정확한 IP가 올 때까지 유지
+            if not self.info.ip:
+                self.info.ip = remote_ip
 
     def mark_offline(self):
         """에이전트 연결 해제"""

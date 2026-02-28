@@ -618,20 +618,41 @@ class WellcomAgent:
         }
 
     def _get_hardware_info(self) -> dict:
-        """하드웨어 정보 수집 (CPU/RAM/MB/GPU)"""
+        """하드웨어 정보 수집 (CPU/RAM/MB/GPU)
+
+        Windows: WMI 명령으로 정확한 모델명 수집
+        기타 OS: psutil + platform 사용
+        """
         info = {'cpu_model': '', 'cpu_cores': 0, 'ram_gb': 0.0,
                 'motherboard': '', 'gpu_model': ''}
+
+        # CPU 코어 수 / RAM (psutil — 모든 OS 공통)
         try:
             import psutil
             info['cpu_cores'] = psutil.cpu_count(logical=False) or 0
             info['ram_gb'] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
         except Exception:
             pass
-        try:
-            info['cpu_model'] = platform.processor()
-        except Exception:
-            pass
+
         if platform.system() == 'Windows':
+            # CPU 모델 (wmic — 정확한 이름: "13th Gen Intel Core i7-13700H" 등)
+            try:
+                r = subprocess.run(
+                    ['wmic', 'cpu', 'get', 'Name'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace'
+                )
+                lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    info['cpu_model'] = lines[1]
+            except Exception:
+                # wmic 실패 시 platform 폴백
+                try:
+                    info['cpu_model'] = platform.processor()
+                except Exception:
+                    pass
+
+            # 메인보드
             try:
                 r = subprocess.run(
                     ['wmic', 'baseboard', 'get', 'Manufacturer,Product'],
@@ -643,6 +664,8 @@ class WellcomAgent:
                     info['motherboard'] = lines[1]
             except Exception:
                 pass
+
+            # GPU (복수 GPU 지원 — ';'로 구분)
             try:
                 r = subprocess.run(
                     ['wmic', 'path', 'win32_VideoController', 'get', 'Name'],
@@ -650,10 +673,18 @@ class WellcomAgent:
                     encoding='utf-8', errors='replace'
                 )
                 lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
-                if len(lines) >= 2:
-                    info['gpu_model'] = lines[1]
+                gpu_names = [l for l in lines[1:] if l]  # 헤더 제외
+                if gpu_names:
+                    info['gpu_model'] = '; '.join(gpu_names)
             except Exception:
                 pass
+        else:
+            # Linux/macOS: platform 사용
+            try:
+                info['cpu_model'] = platform.processor()
+            except Exception:
+                pass
+
         return info
 
     def _setup_upnp(self) -> bool:
