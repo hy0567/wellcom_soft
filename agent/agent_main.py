@@ -1602,7 +1602,7 @@ class WellcomAgent:
             local_port = sock.getsockname()[1]
             logger.info(f"[UDP-Punch] STUN 탐지 시작 (로컬 포트: {local_port})")
 
-            nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=2.0)
+            nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=3.0)
 
             if not endpoint1 or not endpoint1[0]:
                 # NAT 타입 감지 실패 → 기존 방식 폴백
