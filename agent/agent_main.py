@@ -1676,6 +1676,9 @@ class WellcomAgent:
             logger.info(f"[UDP-Punch] 내 공인 엔드포인트: {my_ip}:{my_port} "
                          f"(NAT: {nat_type}, port2={my_port2})")
 
+            # ★ STUN 후 stale 응답 드레인 (늦은 STUN 패킷 제거)
+            await asyncio.sleep(0.1)
+
             # 2. udp_answer 응답 (릴레이 경유, NAT 정보 포함)
             answer = json.dumps({
                 'type': 'udp_answer',

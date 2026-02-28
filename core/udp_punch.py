@@ -5,8 +5,14 @@ LinkIO 방식: 포트포워딩 없이 NAT 뒤의 두 피어가 직접 UDP 통신
 흐름:
 1. 매니저: UDP 소켓 생성 → STUN 탐지 → udp_offer 전송 (릴레이 경유)
 2. 에이전트: udp_offer 수신 → UDP 소켓 생성 → STUN 탐지 → udp_answer 응답
-3. 양쪽 동시 UDP 전송 (3초간) → NAT 홀 뚫림
+3. 양쪽 동시 UDP 전송 → NAT 홀 뚫림
 4. 수신 성공 → UdpChannel 반환
+
+v3.3.9 개선:
+- Stale STUN 응답 드레인 (STUN 후 소켓에 남은 패킷 제거)
+- 더 공격적인 펀칭 (10ms 간격, 8초 지속)
+- 수신 후 1.5초간 추가 ACK 전송 (양방향 확보)
+- 주기적 디버그 로그 (전송/수신 카운트)
 """
 
 import asyncio
@@ -25,19 +31,40 @@ logger = logging.getLogger(__name__)
 # 홀펀칭 상수
 PUNCH_MAGIC = b'\x57\x43\x50\x48'  # 'WCPH' - WellCom Punch Hello
 PUNCH_ACK = b'\x57\x43\x50\x41'    # 'WCPA' - WellCom Punch Ack
-PUNCH_DURATION = 5.0              # 홀펀칭 시도 시간 (초)
-PUNCH_DURATION_SYMMETRIC = 8.0    # Symmetric/Unknown NAT 시 (포트 예측 → 더 오래)
-PUNCH_INTERVAL = 0.03             # 패킷 전송 간격 (30ms, 빠른 펀칭)
-PUNCH_TIMEOUT = 10.0              # 전체 타임아웃
+PUNCH_DURATION = 8.0              # 홀펀칭 시도 시간 (초)
+PUNCH_DURATION_SYMMETRIC = 10.0   # Symmetric/Unknown NAT 시 (포트 예측 → 더 오래)
+PUNCH_INTERVAL = 0.01             # 패킷 전송 간격 (10ms, 빠른 펀칭)
+PUNCH_TIMEOUT = 15.0              # 전체 타임아웃
 
 
 def _create_udp_socket() -> socket.socket:
     """NAT 홀펀칭용 UDP 소켓 생성"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # 수신 버퍼 확대 (빠른 펀칭 패킷 처리)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+    except Exception:
+        pass
     sock.bind(('0.0.0.0', 0))  # 임의 포트
     sock.setblocking(False)
     return sock
+
+
+def _drain_socket(sock: socket.socket) -> int:
+    """소켓에 남은 패킷 모두 드레인 (stale STUN 응답 제거).
+
+    Returns:
+        드레인된 패킷 수
+    """
+    count = 0
+    while True:
+        try:
+            sock.recvfrom(4096)
+            count += 1
+        except (BlockingIOError, OSError):
+            break
+    return count
 
 
 def _predict_ports(port1: int, port2: int, count: int = 32) -> list[int]:
@@ -130,6 +157,12 @@ async def punch_as_manager(relay_ws, agent_id: str,
         logger.info(f"[UDP-Punch] 내 공인 엔드포인트: {my_ip}:{my_port} "
                      f"(NAT: {nat_type}, port2={my_port2})")
 
+        # ★ STUN 후 stale 응답 드레인 (늦은 STUN 패킷 제거)
+        await asyncio.sleep(0.1)  # 늦은 STUN 응답 도착 대기
+        drained = _drain_socket(sock)
+        if drained:
+            logger.debug(f"[UDP-Punch] stale STUN 응답 {drained}개 드레인")
+
         # 2. udp_offer 전송 (릴레이 경유, NAT 정보 포함)
         offer = json.dumps({
             'type': 'udp_offer',
@@ -163,6 +196,9 @@ async def punch_as_manager(relay_ws, agent_id: str,
         peer_port2 = answer.get('udp_port2', 0)
         logger.info(f"[UDP-Punch] 상대방 엔드포인트: {peer_ip}:{peer_port} "
                      f"(NAT: {peer_nat_type}, port2={peer_port2})")
+
+        # ★ 에이전트가 이미 펀칭 시작했을 수 있음 — stale 드레인 후 즉시 시작
+        _drain_socket(sock)
 
         # 4. 홀펀칭 실행 (피어 NAT 정보 전달)
         channel = await _do_punch(
@@ -206,6 +242,11 @@ async def punch_as_agent(sock: socket.socket, peer_ip: str, peer_port: int,
     Returns:
         UdpChannel 또는 None
     """
+    # ★ STUN 후 stale 응답 드레인
+    drained = _drain_socket(sock)
+    if drained:
+        logger.debug(f"[UDP-Punch] stale STUN 응답 {drained}개 드레인")
+
     logger.info(f"[UDP-Punch] 에이전트 홀펀칭 시작 → {peer_ip}:{peer_port} "
                 f"(peer_nat={peer_nat_type})")
 
@@ -238,16 +279,11 @@ async def _do_punch(sock: socket.socket, peer_addr: tuple[str, int],
     Symmetric NAT 대응: 피어가 symmetric NAT이면 포트 예측 리스트를
     생성하여 round-robin으로 여러 포트에 전송.
 
-    Args:
-        sock: UDP 소켓
-        peer_addr: 상대방 (공인IP, 공인PORT) — STUN 탐지 결과
-        token: 16바이트 펀칭 토큰
-        role: b'M'(매니저) 또는 b'A'(에이전트)
-        peer_nat_type: 상대방 NAT 타입
-        peer_port2: 상대방의 두 번째 STUN 포트 (symmetric NAT 예측용)
-
-    Returns:
-        UdpChannel 또는 None
+    v3.3.9 개선:
+    - 송수신 분리: 연속 burst 전송 후 수신 확인
+    - Stale 패킷 무시 (STUN 응답 등)
+    - 수신 후 1.5초간 추가 ACK 전송 (양방향 확보)
+    - 주기적 로그 (2초마다 전송/수신 카운트)
     """
     loop = asyncio.get_event_loop()
     punch_packet = PUNCH_MAGIC + token + role
@@ -278,65 +314,110 @@ async def _do_punch(sock: socket.socket, peer_addr: tuple[str, int],
 
     # 다중 포트 시도 시 더 오래 시도
     duration = PUNCH_DURATION_SYMMETRIC if len(targets) > 1 else PUNCH_DURATION
+    role_name = 'M' if role == b'M' else 'A'
+
+    logger.info(f"[UDP-Punch] 펀칭 시작 (role={role_name}, targets={len(targets)}, "
+                f"duration={duration}s, interval={PUNCH_INTERVAL*1000:.0f}ms)")
 
     start = time.monotonic()
     target_idx = 0
+    send_count = 0
+    recv_count = 0
+    stale_count = 0
+    last_log_time = start
 
     while time.monotonic() - start < duration:
-        # 전송: round-robin으로 여러 포트 시도
-        try:
-            target = targets[target_idx % len(targets)]
-            sock.sendto(punch_packet, target)
-            target_idx += 1
-        except Exception:
-            pass
-
-        # 여러 대상이면 primary도 항상 전송
-        if len(targets) > 1 and target_idx % len(targets) != 1:
+        # ── 전송: burst (3패킷) ──
+        for _ in range(3):
             try:
-                sock.sendto(punch_packet, targets[0])
+                target = targets[target_idx % len(targets)]
+                sock.sendto(punch_packet, target)
+                target_idx += 1
+                send_count += 1
             except Exception:
                 pass
 
-        # 수신 (짧은 대기)
+            # 다중 대상이면 primary도 항상 전송
+            if len(targets) > 1:
+                try:
+                    sock.sendto(punch_packet, targets[0])
+                    send_count += 1
+                except Exception:
+                    pass
+
+        # ── 수신 (짧은 대기) ──
         try:
             data, addr = await asyncio.wait_for(
                 loop.sock_recvfrom(sock, 1024),
                 timeout=PUNCH_INTERVAL,
             )
+            recv_count += 1
 
             # 홀펀칭 패킷 확인
             if len(data) >= len(PUNCH_MAGIC) + 16 + 1:
                 if data[:4] == PUNCH_MAGIC and data[4:20] == token:
                     received_punch = True
                     actual_peer = addr
-                    logger.info(f"[UDP-Punch] 홀펀칭 패킷 수신! from {addr}")
-                    # ACK 전송
+                    peer_role = chr(data[20]) if len(data) > 20 else '?'
+                    elapsed = time.monotonic() - start
+                    logger.info(f"[UDP-Punch] ★ 홀펀칭 패킷 수신! from {addr} "
+                                f"(role={peer_role}, {elapsed:.2f}s, "
+                                f"sent={send_count}, recv={recv_count})")
+                    # ACK 즉시 전송
                     ack_packet = PUNCH_ACK + token + role
                     sock.sendto(ack_packet, addr)
                     break
                 elif data[:4] == PUNCH_ACK and data[4:20] == token:
                     received_punch = True
                     actual_peer = addr
-                    logger.info(f"[UDP-Punch] ACK 수신! from {addr}")
+                    elapsed = time.monotonic() - start
+                    logger.info(f"[UDP-Punch] ★ ACK 수신! from {addr} "
+                                f"({elapsed:.2f}s, sent={send_count})")
                     break
+                else:
+                    stale_count += 1
+            else:
+                stale_count += 1
 
         except asyncio.TimeoutError:
-            continue
-        except Exception:
-            continue
-
-    if not received_punch or not actual_peer:
-        return None
-
-    # ACK 교환 확인 (추가 1초간 ACK 재전송)
-    ack_packet = PUNCH_ACK + token + role
-    for _ in range(10):
-        try:
-            sock.sendto(ack_packet, actual_peer)
-            await asyncio.sleep(0.1)
+            pass
         except Exception:
             pass
+
+        # ── 주기적 로그 (2초마다) ──
+        now = time.monotonic()
+        if now - last_log_time >= 2.0:
+            elapsed = now - start
+            logger.debug(f"[UDP-Punch] {role_name} 진행 중: {elapsed:.1f}s, "
+                         f"sent={send_count}, recv={recv_count}, stale={stale_count}")
+            last_log_time = now
+
+    if not received_punch or not actual_peer:
+        elapsed = time.monotonic() - start
+        logger.info(f"[UDP-Punch] 펀칭 실패 (role={role_name}, {elapsed:.1f}s, "
+                     f"sent={send_count}, recv={recv_count}, stale={stale_count})")
+        return None
+
+    # ★ 양방향 확보: 1.5초간 ACK + PUNCH 반복 전송
+    # (상대방도 패킷을 수신하여 양방향이 확보되어야 UdpChannel이 안정적)
+    ack_packet = PUNCH_ACK + token + role
+    confirm_start = time.monotonic()
+    confirm_count = 0
+    while time.monotonic() - confirm_start < 1.5:
+        try:
+            sock.sendto(punch_packet, actual_peer)
+            sock.sendto(ack_packet, actual_peer)
+            confirm_count += 1
+        except Exception:
+            pass
+        # 추가 수신도 처리 (drain)
+        try:
+            data, addr = await asyncio.wait_for(
+                loop.sock_recvfrom(sock, 1024), timeout=0.05)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    logger.info(f"[UDP-Punch] 양방향 확인 완료 (ACK {confirm_count}회 전송)")
 
     # UdpChannel 생성
     channel = UdpChannel(sock, actual_peer, loop=loop)
