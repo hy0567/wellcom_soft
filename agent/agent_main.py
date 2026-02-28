@@ -163,16 +163,24 @@ def _check_and_apply_update() -> bool:
 
 
 def _restart_agent():
-    """에이전트 재시작"""
-    exe_path = os.environ.get('WELLCOMAGENT_EXE_PATH')
-    if exe_path and os.path.exists(exe_path):
-        subprocess.Popen([exe_path] + sys.argv[1:])
-        sys.exit(0)
-    if getattr(sys, 'frozen', False):
-        subprocess.Popen([sys.executable] + sys.argv[1:])
-    else:
-        subprocess.Popen([sys.executable] + sys.argv)
-    sys.exit(0)
+    """에이전트 재시작 (스레드에서 호출 가능)
+
+    sys.exit()는 daemon 스레드에서 호출 시 해당 스레드만 종료되므로
+    os._exit()를 사용하여 전체 프로세스를 확실히 종료한다.
+    """
+    try:
+        exe_path = os.environ.get('WELLCOMAGENT_EXE_PATH')
+        if exe_path and os.path.exists(exe_path):
+            subprocess.Popen([exe_path] + sys.argv[1:])
+        elif getattr(sys, 'frozen', False):
+            subprocess.Popen([sys.executable] + sys.argv[1:])
+        else:
+            subprocess.Popen([sys.executable] + sys.argv)
+        logger.info("[Restart] 새 프로세스 시작 완료 — 현재 프로세스 종료")
+    except Exception as e:
+        logger.error(f"[Restart] 새 프로세스 시작 실패: {e}")
+    # os._exit(): 스레드/메인 불문 전체 프로세스 강제 종료
+    os._exit(0)
 
 
 def _show_update_ui() -> bool:
@@ -1548,14 +1556,23 @@ class WellcomAgent:
             asyncio.ensure_future(self._handle_udp_offer(websocket, msg))
 
     def _run_remote_update(self, ws):
-        """원격 업데이트 실행 (백그라운드 스레드 — 매니저에 진행상황 전송)"""
+        """원격 업데이트 실행 (백그라운드 스레드 — 매니저에 진행상황 전송)
+
+        릴레이 모드에서도 동작: update_status 메시지에 agent_id를 포함하여
+        릴레이 서버가 올바른 매니저에게 전달할 수 있도록 한다.
+        """
         def send_status(status: str, **kwargs):
-            msg = json.dumps({'type': 'update_status', 'status': status, **kwargs})
+            msg = json.dumps({
+                'type': 'update_status',
+                'agent_id': self._agent_id,
+                'status': status,
+                **kwargs,
+            })
             try:
                 fut = asyncio.run_coroutine_threadsafe(ws.send(msg), self._loop)
                 fut.result(timeout=5)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Update] 상태 전송 실패: {e}")
 
         try:
             from pathlib import Path
@@ -1568,6 +1585,9 @@ class WellcomAgent:
                 __github_repo__ = "hy0567/wellcom_soft"
                 __asset_name__ = "agent.zip"
 
+            logger.info(f"[Update] 원격 업데이트 시작 (현재: v{__version__}, "
+                        f"base: {AGENT_BASE_DIR}, asset: {__asset_name__})")
+
             checker = UpdateChecker(
                 Path(AGENT_BASE_DIR), __github_repo__,
                 asset_name=__asset_name__,
@@ -1576,9 +1596,11 @@ class WellcomAgent:
 
             has_update, release = checker.check_update()
             if not has_update:
+                logger.info(f"[Update] 최신 버전 사용 중: v{__version__}")
                 send_status('up_to_date', version=__version__)
                 return
 
+            logger.info(f"[Update] ★ 업데이트 발견: v{__version__} → v{release.version}")
             send_status('downloading', version=release.version, progress=0)
 
             def progress_cb(downloaded, total):
@@ -1588,13 +1610,15 @@ class WellcomAgent:
 
             success = checker.apply_update(release, progress_callback=progress_cb)
             if success:
+                logger.info(f"[Update] ★ 업데이트 성공: v{release.version} — 재시작 중")
                 send_status('restarting', version=release.version)
                 time.sleep(1)
                 _restart_agent()
             else:
+                logger.error("[Update] 업데이트 적용 실패")
                 send_status('failed', error='업데이트 적용 실패')
         except Exception as e:
-            logger.error(f"원격 업데이트 실패: {e}")
+            logger.error(f"[Update] 원격 업데이트 실패: {e}", exc_info=True)
             send_status('failed', error=str(e))
 
     async def _handle_udp_offer(self, relay_ws, msg: dict):

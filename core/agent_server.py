@@ -916,6 +916,11 @@ class AgentServer(QObject):
 
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
+        elif msg_type == 'update_started':
+            # 구버전 에이전트 호환: update_started → update_status 변환
+            self.update_status_received.emit(agent_id, {
+                'type': 'update_status', 'status': 'checking'
+            })
 
         elif msg_type == 'monitors_info':
             monitors = msg.get('monitors', [])
@@ -1164,6 +1169,11 @@ class AgentServer(QObject):
                 self.agent_info_received.emit(agent_id, info_data)
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
+        elif msg_type == 'update_started':
+            # 구버전 에이전트 호환
+            self.update_status_received.emit(agent_id, {
+                'type': 'update_status', 'status': 'checking'
+            })
 
     def _handle_relay_binary(self, data: bytes):
         """서버 릴레이 바이너리 처리 (32B prefix 있음 — 기존 방식)"""
