@@ -649,20 +649,41 @@ class WellcomAgent:
         }
 
     def _get_hardware_info(self) -> dict:
-        """하드웨어 정보 수집 (CPU/RAM/MB/GPU)"""
+        """하드웨어 정보 수집 (CPU/RAM/MB/GPU)
+
+        Windows: WMI 명령으로 정확한 모델명 수집
+        기타 OS: psutil + platform 사용
+        """
         info = {'cpu_model': '', 'cpu_cores': 0, 'ram_gb': 0.0,
                 'motherboard': '', 'gpu_model': ''}
+
+        # CPU 코어 수 / RAM (psutil — 모든 OS 공통)
         try:
             import psutil
             info['cpu_cores'] = psutil.cpu_count(logical=False) or 0
             info['ram_gb'] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
         except Exception:
             pass
-        try:
-            info['cpu_model'] = platform.processor()
-        except Exception:
-            pass
+
         if platform.system() == 'Windows':
+            # CPU 모델 (wmic — 정확한 이름: "13th Gen Intel Core i7-13700H" 등)
+            try:
+                r = subprocess.run(
+                    ['wmic', 'cpu', 'get', 'Name'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace'
+                )
+                lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    info['cpu_model'] = lines[1]
+            except Exception:
+                # wmic 실패 시 platform 폴백
+                try:
+                    info['cpu_model'] = platform.processor()
+                except Exception:
+                    pass
+
+            # 메인보드
             try:
                 r = subprocess.run(
                     ['wmic', 'baseboard', 'get', 'Manufacturer,Product'],
@@ -674,6 +695,8 @@ class WellcomAgent:
                     info['motherboard'] = lines[1]
             except Exception:
                 pass
+
+            # GPU (복수 GPU 지원 — ';'로 구분)
             try:
                 r = subprocess.run(
                     ['wmic', 'path', 'win32_VideoController', 'get', 'Name'],
@@ -681,10 +704,18 @@ class WellcomAgent:
                     encoding='utf-8', errors='replace'
                 )
                 lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
-                if len(lines) >= 2:
-                    info['gpu_model'] = lines[1]
+                gpu_names = [l for l in lines[1:] if l]  # 헤더 제외
+                if gpu_names:
+                    info['gpu_model'] = '; '.join(gpu_names)
             except Exception:
                 pass
+        else:
+            # Linux/macOS: platform 사용
+            try:
+                info['cpu_model'] = platform.processor()
+            except Exception:
+                pass
+
         return info
 
     def _setup_upnp(self) -> bool:
@@ -859,6 +890,7 @@ class WellcomAgent:
 
         에이전트가 서버에 먼저 연결 → 매니저가 서버 릴레이를 통해 에이전트 제어.
         TeamViewer/AnyDesk 방식 — 어떤 NAT/방화벽에서도 동작.
+        재연결 시 지수 백오프: 1→2→4→8→...→60초
         """
         if not self.api_client or not self.api_client.token:
             return
@@ -871,6 +903,9 @@ class WellcomAgent:
         elif not base.startswith(('ws://', 'wss://')):
             base = 'ws://' + base
         ws_url = f"{base}/ws/agent?token={self.api_client.token}"
+
+        retry_delay = 1  # 초기 1초, 최대 60초까지 지수 백오프
+        MAX_RETRY_DELAY = 60
 
         while self._running:
             try:
@@ -896,6 +931,25 @@ class WellcomAgent:
                     logger.info("[Relay] 서버 릴레이 연결 성공 — 매니저 폴백 대기 중")
                     self._relay_connected = True
                     self._update_tray_icon()
+                    retry_delay = 1  # 연결 성공 시 백오프 리셋
+
+                    # 시스템 정보 즉시 전송 (매니저가 DB 없이도 정보 표시 가능)
+                    try:
+                        sys_info = self._get_system_info()
+                        hw_info = self._get_hardware_info()
+                        screen_w, screen_h = self.screen_capture.screen_size
+                        await ws.send(json.dumps({
+                            'type': 'system_info',
+                            'agent_id': self._agent_id,
+                            **sys_info,
+                            **hw_info,
+                            'screen_width': screen_w,
+                            'screen_height': screen_h,
+                            'agent_version': self._agent_version,
+                        }))
+                        logger.info("[Relay] system_info 전송 완료")
+                    except Exception as e:
+                        logger.warning(f"[Relay] system_info 전송 실패: {e}")
 
                     # 매니저 메시지 처리 루프 (서버가 매니저의 메시지를 에이전트에게 전달)
                     async for message in ws:
@@ -912,12 +966,13 @@ class WellcomAgent:
                 return
             except Exception as e:
                 if self._running:
-                    logger.warning(f"[Relay] 연결 끊김: {type(e).__name__} — 30초 후 재연결")
+                    logger.warning(f"[Relay] 연결 끊김: {type(e).__name__} — {retry_delay}초 후 재연결")
             self._relay_connected = False
             self._update_tray_icon()
             if self._running:
                 try:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
                 except asyncio.CancelledError:
                     return
 
@@ -1469,6 +1524,25 @@ class WellcomAgent:
                 daemon=True, name='UpdateWorker'
             ).start()
 
+        elif msg_type == 'request_info':
+            # 매니저가 시스템 정보 요청 → 즉시 응답
+            try:
+                sys_info = self._get_system_info()
+                hw_info = self._get_hardware_info()
+                screen_w, screen_h = self.screen_capture.screen_size
+                await websocket.send(json.dumps({
+                    'type': 'system_info',
+                    'agent_id': self._agent_id,
+                    **sys_info,
+                    **hw_info,
+                    'screen_width': screen_w,
+                    'screen_height': screen_h,
+                    'agent_version': self._agent_version,
+                }))
+                logger.debug("[Info] system_info 응답 전송")
+            except Exception as e:
+                logger.warning(f"[Info] system_info 응답 실패: {e}")
+
         elif msg_type == 'udp_offer':
             # 매니저의 UDP 홀펀칭 요청 → 비동기 처리
             asyncio.ensure_future(self._handle_udp_offer(websocket, msg))
@@ -1559,7 +1633,7 @@ class WellcomAgent:
             local_port = sock.getsockname()[1]
             logger.info(f"[UDP-Punch] STUN 탐지 시작 (로컬 포트: {local_port})")
 
-            nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=2.0)
+            nat_type, endpoint1, endpoint2 = await stun_detect_nat_type(sock, timeout=3.0)
 
             if not endpoint1 or not endpoint1[0]:
                 # NAT 타입 감지 실패 → 기존 방식 폴백

@@ -87,6 +87,7 @@ class AgentServer(QObject):
     file_complete = pyqtSignal(str, str)               # agent_id, remote_path
     command_result = pyqtSignal(str, str, str, int)    # agent_id, command, output, returncode
     connection_mode_changed = pyqtSignal(str, str)     # agent_id, mode (NEW)
+    agent_info_received = pyqtSignal(str, dict)        # agent_id, info_dict (system_info 수신)
     update_status_received = pyqtSignal(str, dict)     # agent_id, status_dict
     latency_measured = pyqtSignal(str, int)             # agent_id, ms
     monitors_received = pyqtSignal(str, list)           # agent_id, monitors_list
@@ -238,15 +239,19 @@ class AgentServer(QObject):
                     asyncio.run_coroutine_threadsafe(
                         self._close_connection(agent_id), self._loop
                     ).result(timeout=3)
-                except Exception:
-                    pass
+                except (TimeoutError, RuntimeError) as e:
+                    logger.debug(f"[P2P] {agent_id} 종료 중 연결 해제 실패: {type(e).__name__}")
+                except Exception as e:
+                    logger.debug(f"[P2P] {agent_id} 종료 중 예외: {type(e).__name__}: {e}")
 
         # 릴레이 연결 해제
         if self._relay_ws and self._loop and self._loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._relay_ws.close(), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("[Relay] 종료 중 릴레이 해제 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[Relay] 종료 중 릴레이 해제 실패: {type(e).__name__}")
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -472,14 +477,18 @@ class AgentServer(QObject):
             prefixed = _pad_agent_id(agent_id) + data
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(prefixed), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[Relay] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
         else:
             # P2P: 직접 전송 (prefix 없음)
             try:
                 asyncio.run_coroutine_threadsafe(conn.ws.send(data), self._loop)
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: 이벤트 루프 종료")
+            except Exception as e:
+                logger.debug(f"[P2P] {agent_id} 바이너리 전송 실패: {type(e).__name__}")
 
     async def _send_file_async(self, agent_id: str, filepath: str):
         """파일 전송 코루틴"""
@@ -633,8 +642,10 @@ class AgentServer(QObject):
             conn._connecting = False
             logger.info(f"[P2P] {agent_id} 릴레이 폴백 (직접 연결 불가) — "
                          f"{self._UPGRADE_COOLDOWN}초 후 P2P 업그레이드 재시도")
-            self.agent_connected.emit(agent_id, "relay")
+            self.agent_connected.emit(agent_id, conn.ip_public or "relay")
             self.connection_mode_changed.emit(agent_id, "relay")
+            # 에이전트에 시스템 정보 요청 (DB 없이도 정보 표시 가능)
+            self._send_to_agent(agent_id, {'type': 'request_info'})
             # 릴레이 연결 후 자동 P2P 업그레이드 시도 (주기적)
             asyncio.ensure_future(self._auto_p2p_upgrade(agent_id))
             return
@@ -919,7 +930,7 @@ class AgentServer(QObject):
     # ==================== 서버 릴레이 (폴백) ====================
 
     async def _relay_connect_loop(self):
-        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결)"""
+        """서버 WS 릴레이에 접속 (폴백용, 자동 재연결 — 지수 백오프)"""
         if not self._server_url or not self._token:
             return
 
@@ -931,6 +942,9 @@ class AgentServer(QObject):
         elif not base.startswith(('ws://', 'wss://')):
             base = 'ws://' + base
         ws_url = f"{base}/ws/manager?token={self._token}"
+
+        retry_delay = 1  # 초기 1초, 최대 60초까지 지수 백오프
+        MAX_RETRY_DELAY = 60
 
         while not self._stop_event.is_set():
             try:
@@ -944,6 +958,7 @@ class AgentServer(QObject):
                 ) as ws:
                     self._relay_ws = ws
                     logger.info("[P2P/Relay] 서버 릴레이 접속 성공 (폴백 대기)")
+                    retry_delay = 1  # 연결 성공 시 백오프 리셋
 
                     async for message in ws:
                         if self._stop_event.is_set():
@@ -959,7 +974,7 @@ class AgentServer(QObject):
                 return
             except Exception as e:
                 if not self._stop_event.is_set():
-                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {e}")
+                    logger.debug(f"[P2P/Relay] 서버 연결 오류: {type(e).__name__}: {e}")
             finally:
                 self._relay_ws = None
                 # 릴레이 모드인 에이전트들 연결 해제
@@ -970,10 +985,12 @@ class AgentServer(QObject):
                         self.agent_disconnected.emit(agent_id)
 
             if not self._stop_event.is_set():
-                for _ in range(50):
+                logger.debug(f"[P2P/Relay] {retry_delay}초 후 재연결...")
+                for _ in range(int(retry_delay * 10)):
                     if self._stop_event.is_set():
                         return
                     await asyncio.sleep(0.1)
+                retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
 
     def _handle_relay_text(self, raw: str):
         """서버 릴레이 JSON 처리 (기존 v2.x 프로토콜)"""
@@ -1007,6 +1024,8 @@ class AgentServer(QObject):
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, msg.get('ip', ''))
                     self.connection_mode_changed.emit(agent_id, "relay")
+                    # 에이전트에 시스템 정보 요청 (하드웨어 등)
+                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} (릴레이)")
             return
 
@@ -1027,19 +1046,22 @@ class AgentServer(QObject):
                     conn.ws_port = ws_port
 
                 if conn._connecting:
-                    # _connect_cascade 실행 중 — IP만 업데이트하고 중복 시도 안 함
-                    logger.debug(f"[P2P/Relay] {agent_id} IP 업데이트 (cascade 진행 중): "
-                                 f"real_ip={real_ip or 'N/A'}")
+                    # _connect_cascade 실행 중 — IP만 업데이트 (cascade가 대기 후 WAN 재시도함)
+                    logger.info(f"[P2P/Relay] {agent_id} 공인IP 수신 (cascade 대기 중 → WAN 재시도 예정): "
+                                f"real_ip={real_ip or 'N/A'}, ws_port={ws_port}")
                 elif conn.mode == ConnectionMode.DISCONNECTED:
-                    # 새 에이전트 — 릴레이 설정 + P2P 업그레이드 시도
+                    # 새 에이전트 — 릴레이 설정 + WAN 업그레이드 자동 시도
                     logger.info(f"[P2P/Relay] 에이전트 연결: {agent_id} "
                                 f"(real_ip={real_ip or 'N/A'}, ws_port={ws_port})")
                     conn.ws = self._relay_ws
                     conn.mode = ConnectionMode.RELAY
                     self.agent_connected.emit(agent_id, real_ip or '')
                     self.connection_mode_changed.emit(agent_id, "relay")
+                    # 에이전트에 시스템 정보 요청
+                    self._send_to_agent(agent_id, {'type': 'request_info'})
                     if real_ip and not conn._upgrading:
-                        asyncio.ensure_future(self._try_p2p_upgrade(agent_id))
+                        # 즉시 P2P 업그레이드 + 실패 시 주기적 재시도
+                        asyncio.ensure_future(self._auto_p2p_upgrade(agent_id))
                 elif conn.mode == ConnectionMode.RELAY and real_ip:
                     # 이미 릴레이 연결인데 real_ip가 새로 왔으면 업그레이드 시도
                     if not conn._upgrading:
@@ -1096,6 +1118,33 @@ class AgentServer(QObject):
             stderr = msg.get('stderr', '')
             returncode = msg.get('returncode', -1)
             self.command_result.emit(agent_id, command, stdout if stdout else stderr, returncode)
+        elif msg_type == 'system_info':
+            # 에이전트가 보낸 시스템 정보 (릴레이 경유)
+            conn = self._connections.get(agent_id)
+            if conn:
+                info_data = {
+                    'hostname': msg.get('hostname', ''),
+                    'os_info': msg.get('os_info', ''),
+                    'ip': msg.get('ip', ''),
+                    'ip_public': msg.get('ip_public', ''),
+                    'mac_address': msg.get('mac_address', ''),
+                    'screen_width': msg.get('screen_width', 0),
+                    'screen_height': msg.get('screen_height', 0),
+                    'agent_version': msg.get('agent_version', ''),
+                    'cpu_model': msg.get('cpu_model', ''),
+                    'cpu_cores': msg.get('cpu_cores', 0),
+                    'ram_gb': msg.get('ram_gb', 0.0),
+                    'motherboard': msg.get('motherboard', ''),
+                    'gpu_model': msg.get('gpu_model', ''),
+                }
+                conn.info.update(info_data)
+                if msg.get('ip_public'):
+                    conn.ip_public = msg['ip_public']
+                logger.info(f"[P2P/Relay] {agent_id} system_info 수신: "
+                            f"hostname={info_data['hostname']}, "
+                            f"ip_public={info_data['ip_public'] or 'N/A'}, "
+                            f"version={info_data['agent_version']}")
+                self.agent_info_received.emit(agent_id, info_data)
         elif msg_type == 'update_status':
             self.update_status_received.emit(agent_id, msg)
 

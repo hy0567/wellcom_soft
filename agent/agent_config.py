@@ -17,8 +17,8 @@ class AgentConfig:
         'save_dir': '',
         'auto_start': True,
         'clipboard_sync': True,
-        'screen_quality': 80,       # JPEG/H.264 품질 (1-100)
-        'screen_fps': 30,           # 스트리밍 FPS (LinkIO 수준)
+        'screen_quality': 90,       # JPEG/H.264 품질 (1-100, 높을수록 선명)
+        'screen_fps': 30,           # 스트리밍 FPS
         'thumbnail_quality': 50,    # 썸네일 품질
         'thumbnail_width': 480,     # 썸네일 최대 너비
         'heartbeat_interval': 30,   # 하트비트 간격 (초)
@@ -72,9 +72,9 @@ class AgentConfig:
     def _migrate(self):
         """구 버전 설정 마이그레이션 — 낮은 기본값을 신규 기본값으로 업그레이드"""
         changed = False
-        # v3.2.4 이전: screen_quality=60, screen_fps=15 → 80, 30
-        if self._data.get('screen_quality', 0) <= 60:
-            self._data['screen_quality'] = 80
+        # v3.2.4 이전: screen_quality 80 이하 → 90
+        if self._data.get('screen_quality', 0) <= 80:
+            self._data['screen_quality'] = 90
             changed = True
         if self._data.get('screen_fps', 0) <= 15:
             self._data['screen_fps'] = 30

@@ -5,6 +5,8 @@ WellcomSOFT 설정
 import sys
 import os
 import json
+import base64
+import hashlib
 from typing import Any, Optional
 
 
@@ -87,16 +89,22 @@ class Settings:
         },
         'screen': {
             'thumbnail_interval': 1000,   # ms - 그리드 썸네일 갱신 간격
-            'stream_fps': 30,             # 전체 화면 스트리밍 FPS (LinkIO 수준)
-            'stream_quality': 80,         # 스트리밍 JPEG/H.264 품질 (1-100)
-            'thumbnail_quality': 50,      # 썸네일 JPEG 품질 (40→50 개선)
-            'thumbnail_width': 480,       # 썸네일 최대 너비 (320→480 개선)
+            'stream_fps': 30,             # 전체 화면 스트리밍 FPS
+            'stream_quality': 90,         # 스트리밍 품질 (1-100, 높을수록 선명)
+            'stream_codec': 'h264',       # 코덱 (h264=고화질 저대역폭, mjpeg=호환성)
+            'keyframe_interval': 60,      # H.264 키프레임 간격 (프레임 수)
+            'thumbnail_quality': 50,      # 썸네일 JPEG 품질
+            'thumbnail_width': 480,       # 썸네일 최대 너비
         },
         'grid_view': {
             'columns': 5,                 # 기본 5컬럼 (LinkIO 기준)
             'scale_factor': 100,          # 축척 (%)
             'show_title': True,           # 타이틀 표시
             'frame_speed': 5,             # 그리드 FPS
+            'aspect_ratio': '16:9',       # 썸네일 비율
+            'font_size': 9,              # 썸네일 폰트 크기 (5~16)
+            'show_name': True,           # PC 이름 표시
+            'show_memo': True,           # 메모 표시
         },
         'multi_control': {
             'random_pos_x': 3,            # 랜덤 좌표 오프셋 X (px)
@@ -119,7 +127,7 @@ class Settings:
             'key_16': '', 'key_17': '', 'key_18': '', 'key_19': '', 'key_20': '',
         },
         'general': {
-            'theme': 'dark',              # dark / light
+            'theme': 'light',             # dark / light
             'language': 'ko',
             'start_minimized': False,
             'confirm_delete': True
@@ -166,9 +174,9 @@ class Settings:
         changed = False
         screen = self._data.get('screen', {})
 
-        # v3.2.4 이전: stream_quality=60, stream_fps=15 → 80, 30
-        if screen.get('stream_quality', 0) <= 60:
-            screen['stream_quality'] = 80
+        # v3.2.4 이전: stream_quality=60 → 90, stream_fps=15 → 30
+        if screen.get('stream_quality', 0) <= 80:
+            screen['stream_quality'] = 90
             changed = True
         if screen.get('stream_fps', 0) <= 15:
             screen['stream_fps'] = 30
@@ -235,6 +243,66 @@ class Settings:
         else:
             self._data = {}
             self.save()
+
+    # ==================== 토큰 암호화 ====================
+
+    _MACHINE_KEY: Optional[bytes] = None
+
+    @staticmethod
+    def _get_machine_key() -> bytes:
+        """머신 고유 키 생성 (사용자+호스트+MAC 기반)"""
+        if Settings._MACHINE_KEY:
+            return Settings._MACHINE_KEY
+        import socket
+        import uuid
+        raw = f"{os.getlogin()}:{socket.gethostname()}:{uuid.getnode()}"
+        Settings._MACHINE_KEY = hashlib.sha256(raw.encode()).digest()
+        return Settings._MACHINE_KEY
+
+    @staticmethod
+    def _xor_crypt(data: bytes, key: bytes) -> bytes:
+        """XOR 기반 암호화/복호화 (대칭)"""
+        key_len = len(key)
+        return bytes(b ^ key[i % key_len] for i, b in enumerate(data))
+
+    def save_token(self, token: str):
+        """토큰을 암호화하여 저장"""
+        if not token:
+            self.set('server.token', '')
+            self.set('server._token_enc', '')
+            return
+        key = self._get_machine_key()
+        encrypted = self._xor_crypt(token.encode('utf-8'), key)
+        encoded = base64.b64encode(encrypted).decode('ascii')
+        self.set('server._token_enc', encoded, auto_save=False)
+        self.set('server.token', '', auto_save=True)  # 평문 제거
+
+    def load_token(self) -> str:
+        """저장된 토큰 복호화하여 반환"""
+        # 1) 암호화된 토큰 시도
+        encoded = self.get('server._token_enc', '')
+        if encoded:
+            try:
+                key = self._get_machine_key()
+                encrypted = base64.b64decode(encoded)
+                token = self._xor_crypt(encrypted, key).decode('utf-8')
+                if token:
+                    return token
+            except Exception:
+                pass
+
+        # 2) 레거시: 평문 토큰 마이그레이션
+        plain = self.get('server.token', '')
+        if plain:
+            self.save_token(plain)  # 자동 암호화 마이그레이션
+            return plain
+
+        return ''
+
+    def clear_token(self):
+        """토큰 완전 삭제"""
+        self.set('server.token', '', auto_save=False)
+        self.set('server._token_enc', '', auto_save=True)
 
 
 # 싱글톤 인스턴스

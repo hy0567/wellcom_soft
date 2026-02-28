@@ -168,14 +168,22 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        group = QGroupBox("그리드 뷰 설정")
-        form = QFormLayout(group)
+        # 레이아웃 설정
+        layout_group = QGroupBox("레이아웃")
+        form = QFormLayout(layout_group)
 
         self.spin_columns = QSpinBox()
-        self.spin_columns.setRange(0, 20)
+        self.spin_columns.setRange(1, 20)
         self.spin_columns.setValue(settings.get('grid_view.columns', 5))
-        self.spin_columns.setSpecialValueText("자동")
         form.addRow("컬럼 수:", self.spin_columns)
+
+        self.combo_aspect = QComboBox()
+        self.combo_aspect.addItems(['16:9', '16:10', '4:3', '3:2', '1:1'])
+        current_ratio = settings.get('grid_view.aspect_ratio', '16:9')
+        idx = self.combo_aspect.findText(current_ratio)
+        if idx >= 0:
+            self.combo_aspect.setCurrentIndex(idx)
+        form.addRow("썸네일 비율:", self.combo_aspect)
 
         self.spin_scale = QSpinBox()
         self.spin_scale.setRange(50, 200)
@@ -183,17 +191,37 @@ class SettingsDialog(QDialog):
         self.spin_scale.setSuffix(" %")
         form.addRow("축척:", self.spin_scale)
 
+        layout.addWidget(layout_group)
+
+        # 표시 설정
+        display_group = QGroupBox("표시")
+        form2 = QFormLayout(display_group)
+
         self.spin_grid_fps = QSpinBox()
         self.spin_grid_fps.setRange(1, 30)
         self.spin_grid_fps.setValue(settings.get('grid_view.frame_speed', 5))
         self.spin_grid_fps.setSuffix(" FPS")
-        form.addRow("그리드 FPS:", self.spin_grid_fps)
+        form2.addRow("그리드 FPS:", self.spin_grid_fps)
 
-        self.chk_show_title = QCheckBox("PC 이름 표시")
+        self.spin_font_size = QSpinBox()
+        self.spin_font_size.setRange(5, 16)
+        self.spin_font_size.setValue(settings.get('grid_view.font_size', 9))
+        self.spin_font_size.setSuffix(" pt")
+        form2.addRow("폰트 크기:", self.spin_font_size)
+
+        self.chk_show_name = QCheckBox("PC 이름 표시")
+        self.chk_show_name.setChecked(settings.get('grid_view.show_name', True))
+        form2.addRow(self.chk_show_name)
+
+        self.chk_show_memo = QCheckBox("메모 표시")
+        self.chk_show_memo.setChecked(settings.get('grid_view.show_memo', True))
+        form2.addRow(self.chk_show_memo)
+
+        self.chk_show_title = QCheckBox("타이틀 표시")
         self.chk_show_title.setChecked(settings.get('grid_view.show_title', True))
-        form.addRow(self.chk_show_title)
+        form2.addRow(self.chk_show_title)
 
-        layout.addWidget(group)
+        layout.addWidget(display_group)
         layout.addStretch()
         return widget
 
@@ -283,8 +311,12 @@ class SettingsDialog(QDialog):
 
         # 그리드
         settings.set('grid_view.columns', self.spin_columns.value(), auto_save=False)
+        settings.set('grid_view.aspect_ratio', self.combo_aspect.currentText(), auto_save=False)
         settings.set('grid_view.scale_factor', self.spin_scale.value(), auto_save=False)
         settings.set('grid_view.frame_speed', self.spin_grid_fps.value(), auto_save=False)
+        settings.set('grid_view.font_size', self.spin_font_size.value(), auto_save=False)
+        settings.set('grid_view.show_name', self.chk_show_name.isChecked(), auto_save=False)
+        settings.set('grid_view.show_memo', self.chk_show_memo.isChecked(), auto_save=False)
         settings.set('grid_view.show_title', self.chk_show_title.isChecked(), auto_save=False)
 
         # 뷰어

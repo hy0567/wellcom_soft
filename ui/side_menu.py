@@ -1,49 +1,74 @@
-"""사이드 메뉴바
+"""사이드 메뉴바 — 현대적 UI
 
-LinkIO Desktop 스타일의 사이드 메뉴 바.
-DesktopWidget 옆에 표시되며, 빠른 조작 버튼을 제공한다.
+LinkIO Desktop 스타일 사이드 메뉴 바.
+DesktopWidget 옆에 표시, 빠른 조작 버튼 + 섹션 구분 + 테마 지원.
 """
 
 import logging
-from typing import Optional
-
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QSizePolicy, QToolTip,
+    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QIcon, QFont
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class SideMenuButton(QPushButton):
-    """사이드 메뉴 버튼"""
+def _side_theme():
+    """사이드 메뉴 테마 색상"""
+    theme = settings.get('general.theme', 'light')
+    if theme == 'dark':
+        return {
+            'bg': '#1e1e1e', 'border': '#333',
+            'btn_bg': '#2a2a2e', 'btn_hover': '#3a3a40', 'btn_pressed': '#094771',
+            'btn_text': '#d0d0d0', 'btn_text_hover': '#fff',
+            'btn_border': '#3e3e3e',
+            'section_text': '#888', 'sep': '#333',
+            'close_text': '#e04040', 'close_hover_bg': '#e04040',
+        }
+    return {
+        'bg': '#f8fafc', 'border': '#e2e8f0',
+        'btn_bg': '#ffffff', 'btn_hover': '#f1f5f9', 'btn_pressed': '#dbeafe',
+        'btn_text': '#475569', 'btn_text_hover': '#1e293b',
+        'btn_border': '#e2e8f0',
+        'section_text': '#94a3b8', 'sep': '#e2e8f0',
+        'close_text': '#ef4444', 'close_hover_bg': '#fef2f2',
+    }
 
-    def __init__(self, text: str, tooltip: str = '', parent=None):
-        super().__init__(text, parent)
-        self.setFixedSize(40, 36)
+
+class SideMenuButton(QPushButton):
+    """사이드 메뉴 버튼 — 테마 지원 + 아이콘 텍스트"""
+
+    def __init__(self, icon_text: str, tooltip: str = '', parent=None):
+        super().__init__(icon_text, parent)
+        c = _side_theme()
+        self.setFixedSize(48, 38)
         self.setToolTip(tooltip)
-        self.setStyleSheet("""
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #ccc;
-                border: 1px solid #3e3e3e;
-                border-radius: 3px;
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFont(QFont("Segoe UI", 11))
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['btn_bg']};
+                color: {c['btn_text']};
+                border: 1px solid {c['btn_border']};
+                border-radius: 6px;
                 font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #3e3e3e;
-                color: #fff;
-            }
-            QPushButton:pressed {
-                background-color: #094771;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c['btn_hover']};
+                color: {c['btn_text_hover']};
+                border: 1px solid {c['btn_border']};
+            }}
+            QPushButton:pressed {{
+                background-color: {c['btn_pressed']};
+            }}
         """)
 
 
 class SideMenu(QWidget):
-    """사이드 메뉴바"""
+    """사이드 메뉴바 — 현대적 UI + 섹션 구분"""
 
     # 기존 시그널
     clipboard_sync_clicked = pyqtSignal()
@@ -55,45 +80,58 @@ class SideMenu(QWidget):
     script_stop_clicked = pyqtSignal()
     command_clicked = pyqtSignal()
 
-    # v2.0.1 — 화질/FPS 조절
+    # 화질/FPS 조절
     quality_up_clicked = pyqtSignal()
     quality_down_clicked = pyqtSignal()
     fps_up_clicked = pyqtSignal()
     fps_down_clicked = pyqtSignal()
 
-    # v2.0.1 — 특수키
+    # 특수키
     ctrl_alt_del_clicked = pyqtSignal()
     alt_tab_clicked = pyqtSignal()
     win_key_clicked = pyqtSignal()
 
-    # v2.0.1 — 화면 비율
+    # 화면 비율
     ratio_toggle_clicked = pyqtSignal()
 
-    # v3.3 — 모니터 선택 / 오디오
+    # 모니터 / 오디오
     monitor_clicked = pyqtSignal()
     audio_toggle_clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(50)
-        self.setStyleSheet("background-color: #252526; border-left: 1px solid #3e3e3e;")
+        c = _side_theme()
+        self.setFixedWidth(56)
+        self.setStyleSheet(
+            f"background-color: {c['bg']}; border-left: 1px solid {c['border']};"
+        )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 8, 4, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(3, 6, 3, 6)
+        layout.setSpacing(3)
 
-        # ── 화면 제어 ──
-        self.btn_fullscreen = SideMenuButton("F", "전체화면 (F11)")
+        # ── 화면 ──
+        layout.addWidget(self._section_label("화면", c))
+
+        self.btn_fullscreen = SideMenuButton("[ ]", "전체화면 (F11)")
         self.btn_fullscreen.clicked.connect(self.fullscreen_clicked.emit)
         layout.addWidget(self.btn_fullscreen)
 
-        self.btn_ratio = SideMenuButton("R", "화면 비율 (Fit/Stretch)")
+        self.btn_ratio = SideMenuButton("16:9", "화면 비율 전환 (Fit/Stretch)")
+        self.btn_ratio.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_ratio.clicked.connect(self.ratio_toggle_clicked.emit)
         layout.addWidget(self.btn_ratio)
 
-        layout.addSpacing(6)
+        self.btn_monitor = SideMenuButton("MON", "모니터 선택")
+        self.btn_monitor.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.btn_monitor.clicked.connect(self.monitor_clicked.emit)
+        layout.addWidget(self.btn_monitor)
 
-        # ── 화질/FPS 조절 ──
+        layout.addWidget(self._separator(c))
+
+        # ── 품질 ──
+        layout.addWidget(self._section_label("품질", c))
+
         self.btn_quality_up = SideMenuButton("Q+", "화질 올리기 (+10)")
         self.btn_quality_up.clicked.connect(self.quality_up_clicked.emit)
         layout.addWidget(self.btn_quality_up)
@@ -110,76 +148,111 @@ class SideMenu(QWidget):
         self.btn_fps_down.clicked.connect(self.fps_down_clicked.emit)
         layout.addWidget(self.btn_fps_down)
 
-        layout.addSpacing(6)
+        layout.addWidget(self._separator(c))
 
-        # ── 클립보드/파일/스크린샷 ──
-        self.btn_clipboard = SideMenuButton("CB", "클립보드 동기화")
+        # ── 도구 ──
+        layout.addWidget(self._section_label("도구", c))
+
+        self.btn_clipboard = SideMenuButton("CB", "클립보드 동기화\n원격 PC와 텍스트 공유")
         self.btn_clipboard.clicked.connect(self.clipboard_sync_clicked.emit)
         layout.addWidget(self.btn_clipboard)
 
-        self.btn_file = SideMenuButton("FT", "파일 전송")
+        self.btn_file = SideMenuButton("FILE", "파일 전송\n로컬 파일을 원격 PC로 전송")
+        self.btn_file.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_file.clicked.connect(self.file_send_clicked.emit)
         layout.addWidget(self.btn_file)
 
-        self.btn_screenshot = SideMenuButton("SS", "스크린샷 저장")
+        self.btn_screenshot = SideMenuButton("CAP", "스크린샷 저장\n현재 화면을 PNG로 저장")
+        self.btn_screenshot.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_screenshot.clicked.connect(self.screenshot_clicked.emit)
         layout.addWidget(self.btn_screenshot)
 
-        self.btn_monitor = SideMenuButton("M", "모니터 선택")
-        self.btn_monitor.clicked.connect(self.monitor_clicked.emit)
-        layout.addWidget(self.btn_monitor)
-
-        self.btn_audio = SideMenuButton("A", "오디오 켜기/끄기")
+        self.btn_audio = SideMenuButton("AUD", "오디오 켜기/끄기\n원격 PC 소리 스트리밍")
+        self.btn_audio.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_audio.clicked.connect(self.audio_toggle_clicked.emit)
         layout.addWidget(self.btn_audio)
 
-        layout.addSpacing(6)
+        layout.addWidget(self._separator(c))
 
-        # ── 특수키 ──
-        self.btn_cad = SideMenuButton("CD", "Ctrl+Alt+Del")
+        # ── 키보드 ──
+        layout.addWidget(self._section_label("키", c))
+
+        self.btn_cad = SideMenuButton("CAD", "Ctrl + Alt + Del 전송")
+        self.btn_cad.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_cad.clicked.connect(self.ctrl_alt_del_clicked.emit)
         layout.addWidget(self.btn_cad)
 
-        self.btn_alt_tab = SideMenuButton("AT", "Alt+Tab")
+        self.btn_alt_tab = SideMenuButton("ALT", "Alt + Tab 전송")
+        self.btn_alt_tab.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_alt_tab.clicked.connect(self.alt_tab_clicked.emit)
         layout.addWidget(self.btn_alt_tab)
 
-        self.btn_win = SideMenuButton("W", "Windows 키")
+        self.btn_win = SideMenuButton("WIN", "Windows 키 전송")
+        self.btn_win.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_win.clicked.connect(self.win_key_clicked.emit)
         layout.addWidget(self.btn_win)
 
-        layout.addSpacing(6)
+        layout.addWidget(self._separator(c))
 
-        # ── 명령/스크립트 ──
-        self.btn_command = SideMenuButton("C>", "명령 실행")
+        # ── 명령 ──
+        layout.addWidget(self._section_label("실행", c))
+
+        self.btn_command = SideMenuButton("CMD", "명령 실행\n원격 PC에서 명령어 실행")
+        self.btn_command.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_command.clicked.connect(self.command_clicked.emit)
         layout.addWidget(self.btn_command)
 
-        self.btn_script_run = SideMenuButton("SR", "스크립트 실행 (Ctrl+3)")
+        self.btn_script_run = SideMenuButton("RUN", "스크립트 실행 (Ctrl+3)")
+        self.btn_script_run.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_script_run.clicked.connect(self.script_run_clicked.emit)
         layout.addWidget(self.btn_script_run)
 
-        self.btn_script_stop = SideMenuButton("ST", "스크립트 중지 (Ctrl+4)")
+        self.btn_script_stop = SideMenuButton("STP", "스크립트 중지 (Ctrl+4)")
+        self.btn_script_stop.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.btn_script_stop.clicked.connect(self.script_stop_clicked.emit)
         layout.addWidget(self.btn_script_stop)
 
         layout.addStretch()
 
         # ── 닫기 ──
-        self.btn_close = SideMenuButton("X", "닫기")
-        self.btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #e04040;
-                border: 1px solid #3e3e3e;
-                border-radius: 3px;
-                font-size: 13px;
+        self.btn_close = SideMenuButton("X", "뷰어 닫기")
+        self.btn_close.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['btn_bg']};
+                color: {c['close_text']};
+                border: 1px solid {c['btn_border']};
+                border-radius: 6px;
+                font-size: 14px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e04040;
-                color: #fff;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c['close_hover_bg']};
+                color: {c['close_text']};
+            }}
         """)
         self.btn_close.clicked.connect(self.close_clicked.emit)
         layout.addWidget(self.btn_close)
+
+    @staticmethod
+    def _section_label(text: str, c: dict) -> QLabel:
+        """섹션 헤더 라벨"""
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setFont(QFont("Segoe UI", 7))
+        label.setStyleSheet(
+            f"color: {c['section_text']}; background: transparent;"
+            f" border: none; padding: 1px 0;"
+        )
+        label.setFixedHeight(14)
+        return label
+
+    @staticmethod
+    def _separator(c: dict) -> QFrame:
+        """섹션 구분선"""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(
+            f"QFrame {{ background-color: {c['sep']}; border: none; }}"
+        )
+        return sep
